@@ -1,0 +1,4 @@
+lxml
+pyproj
+qgis  # if using PyQGIS bindings
+arcpy  # if ArcGIS Pro is installed
