@@ -12,6 +12,8 @@ from qgis.core import (
     QgsReadWriteContext
 )
 
+from display_field_converter import set_display_field
+
 
 def _open_lyrx(lyrx):
     with open(lyrx, 'r', encoding='utf-8') as f:
@@ -125,6 +127,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     _set_description(layer, layer_def)
     _set_scale_visibility(layer, layer_def)
 
+    set_display_field(layer, layer_def)
     # props = {
     #     "name": layer_def.get("name"),
     #     "attribution": layer_def.get("attribution"),
@@ -170,14 +173,15 @@ def convert_lyrx(in_lyrx, out_folder=None):
 
     out_layer.setCustomProperty("legend/checked", visibility)
     out_layer.setCustomProperty("legend/expanded", expanded)
+
     doc = QgsLayerDefinition.exportLayerDefinitionLayers([out_layer], QgsReadWriteContext())
     with open(out_file, 'w', encoding='utf-8') as f:
         f.write(doc.toString())
 
 
 if __name__ == "__main__":
-    output_folder = r""
-    in_lyrx = r""
+    output_folder = r"G:\Projects\QGIS Support\test_results"
+    in_lyrx = r"G:\Working\Students\Undergraduate\For_Vince\ArcGIS_AddOn\ArcGISPaleo_AddOn\dummy.lyrx"
 
     try:
         qgs = QgsApplication([], False)
