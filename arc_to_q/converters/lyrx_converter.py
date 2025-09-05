@@ -165,23 +165,19 @@ def convert_lyrx(in_lyrx, out_folder=None):
         raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
 
     # Common properties
-    if "visibility" in layer_def:
-        out_layer.setVisible(layer_def["visibility"])
-    else:
-        out_layer.setVisible(False)
-    if "expanded" in layer_def:
-        out_layer.setExpanded(layer_def["expanded"])
-    else:
-        out_layer.setExpanded(False)
+    visibility = layer_def.get("visibility", False)
+    expanded = layer_def.get("expanded", False)
 
+    out_layer.setCustomProperty("legend/checked", visibility)
+    out_layer.setCustomProperty("legend/expanded", expanded)
     doc = QgsLayerDefinition.exportLayerDefinitionLayers([out_layer], QgsReadWriteContext())
     with open(out_file, 'w', encoding='utf-8') as f:
         f.write(doc.toString())
 
 
 if __name__ == "__main__":
-    output_folder = r'D:\GBDS\Map_Layers_QGIS'
-    in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
+    output_folder = r""
+    in_lyrx = r""
 
     try:
         qgs = QgsApplication([], False)
