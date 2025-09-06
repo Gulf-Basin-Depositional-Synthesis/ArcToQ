@@ -182,8 +182,8 @@ def convert_lyrx(in_lyrx, out_folder=None):
 
 
 if __name__ == "__main__":
-    output_folder = r"G:\Projects\QGIS Support\test_results"
-    in_lyrx = r"G:\Working\Students\Undergraduate\For_Vince\ArcGIS_AddOn\ArcGISPaleo_AddOn\dummy.lyrx"
+    output_folder = r""
+    in_lyrx = r""
 
     try:
         qgs = QgsApplication([], False)
