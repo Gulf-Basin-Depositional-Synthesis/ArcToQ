@@ -13,6 +13,7 @@ from qgis.core import (
 )
 
 from display_field_converter import set_display_field
+from symbology_converter import set_symbology
 
 
 def _open_lyrx(lyrx):
@@ -128,6 +129,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     _set_scale_visibility(layer, layer_def)
 
     set_display_field(layer, layer_def)
+    set_symbology(layer, layer_def)
     # props = {
     #     "name": layer_def.get("name"),
     #     "attribution": layer_def.get("attribution"),
