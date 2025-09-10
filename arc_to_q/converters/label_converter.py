@@ -52,6 +52,7 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
     font.setFamily(text_symbol.get("fontFamilyName", "Arial"))
     font.setPointSize(text_symbol.get("height", 8))
     text_format.setFont(font)
+    text_format.setSize(text_symbol.get("height", 8))
 
     # Text color
     cim_color = text_symbol["symbol"]["symbolLayers"][0]["color"]
