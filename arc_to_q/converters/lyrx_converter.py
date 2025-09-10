@@ -142,7 +142,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     _set_credits(layer, layer_def["attribution"])
     _set_description(layer, layer_def["description"])
     _set_scale_visibility(layer, layer_def)
-    set_vector_renderer(layer, layer_def["renderer"])
+    # set_vector_renderer(layer, layer_def["renderer"])
 
     _set_display_field(layer, layer_def)
     set_symbology(layer, layer_def)
