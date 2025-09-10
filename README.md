@@ -23,5 +23,5 @@ Currently only one file works: our layer converter.
 To convert layer files, run the layer converter from the QGIS Python environment, e.g., for Windows:
 
 1. Start PowerShell.
-2. cd to the directory containing **lyrx_converter.py**.
-3. `& "C:\Program Files\QGIS 3.40.10\bin\python-qgis-ltr.bat" lyrx_converter.py`
+2. cd to the **ArcToQ** folder.
+3. Run your test script, e.g., `& "C:\Program Files\QGIS 3.40.10\bin\python-qgis-ltr.bat" .\tests\tim_test.py`
