@@ -11,7 +11,7 @@ from qgis.core import (
     QgsReadWriteContext
 )
 
-from .vector_renderer import set_vector_renderer
+from arc_to_q.converters.symbology_converter import set_symbology
 
 
 def _open_lyrx(lyrx):
@@ -109,6 +109,25 @@ def _set_description(layer, description):
         layer.setMetadata(md)
 
 
+def _set_display_field(layer: QgsVectorLayer, layer_def: dict):
+    """
+    Sets the display field (or "Display Name") for a QGIS layer.
+
+    In ArcGIS Pro, the "display field" controls what text is shown when using
+    the Identify tool. In QGIS, this is called the "Display Name".
+
+    Args:
+        layer (QgsVectorLayer): The in-memory QGIS layer object to modify.
+        layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
+    """
+    # In the LYRX JSON, the display field is usually under featureTable
+    feature_table = layer_def.get("featureTable", {})
+    display_field = feature_table.get("displayField")
+
+    if display_field and layer:
+        layer.setDisplayExpression(f'"{display_field}"')
+
+
 def _convert_feature_layer(in_folder, layer_def, out_file):
     layer_name = layer_def['name']
     if layer_def["useSourceMetadata"] == True:
@@ -125,6 +144,8 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     _set_scale_visibility(layer, layer_def)
     set_vector_renderer(layer, layer_def["renderer"])
 
+    _set_display_field(layer, layer_def)
+    set_symbology(layer, layer_def)
     # props = {
     #     "name": layer_def.get("name"),
     #     "expanded": layer_def.get("expanded", True),
@@ -175,19 +196,32 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         else:
             raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
 
-        # # Common properties
-        # if "visibility" in layer_def:
-        #     out_layer.setVisible(layer_def["visibility"])
-        # else:
-        #     out_layer.setVisible(False)
-        # if "expanded" in layer_def:
-        #     out_layer.setExpanded(layer_def["expanded"])
-        # else:
-        #     out_layer.setExpanded(False)
+        # Common properties
+        visibility = layer_def.get("visibility", False)
+        expanded = layer_def.get("expanded", False)
+
+        out_layer.setCustomProperty("legend/checked", visibility)
+        out_layer.setCustomProperty("legend/expanded", expanded)
 
         doc = QgsLayerDefinition.exportLayerDefinitionLayers([out_layer], QgsReadWriteContext())
         with open(out_file, 'w', encoding='utf-8') as f:
             f.write(doc.toString())
+    except Exception as e:
+        print(f"Error converting LYRX: {e}")
+    finally:
+        if manage_qgs:
+            qgs.exitQgis()
+
+
+if __name__ == "__main__":
+    output_folder = r""
+    in_lyrx = r""
+
+    try:
+        qgs = QgsApplication([], False)
+        qgs.initQgis()
+
+        convert_lyrx(in_lyrx, output_folder, qgs)
     except Exception as e:
         print(f"Error converting LYRX: {e}")
     finally:
