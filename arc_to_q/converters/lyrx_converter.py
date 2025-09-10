@@ -91,21 +91,28 @@ def _set_scale_visibility(layer, layer_def):
     layer.setMaximumScale(max_scale)
 
 
-def _set_credits(layer, attribution):
-    """Set the QGIS layer credits based on the ArcGIS layer definition."""
+def _set_metadata(layer: QgsVectorLayer, layer_def: dict):
+    """
+    Sets the metadata for a QGIS layer based on the ArcGIS layer definition.
+
+    Args:
+        layer (QgsVectorLayer): The in-memory QGIS layer object to modify.
+        layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
+    """
+    attribution = layer_def.get("attribution", "")
+    description = layer_def.get("description", "")
+    title = layer_def.get("name", "")
+
+    md = layer.metadata()
+
     if attribution:
-        md = layer.metadata()
         md.setRights([attribution])
-        layer.setMetadata(md)
-
-
-def _set_description(layer, description):
-    """
-    Set the QGIS layer description (abstract) based on the ArcGIS layer definition.
-    """
     if description:
-        md = layer.metadata()
         md.setAbstract(description)
+    if title:
+        md.setTitle(title)
+
+    if attribution or description or title:
         layer.setMetadata(md)
 
 
@@ -194,8 +201,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
 
         # # Common properties
-        _set_credits(out_layer, layer_def["attribution"])
-        _set_description(out_layer, layer_def["description"])
+        _set_metadata(out_layer, layer_def)
         _set_scale_visibility(out_layer, layer_def)
 
         # visibility = layer_def.get("visibility", False)
