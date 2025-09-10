@@ -8,9 +8,10 @@ from qgis.core import (
     QgsApplication,
     QgsVectorLayer,
     QgsLayerDefinition,
-    QgsLayerMetadata,
     QgsReadWriteContext
 )
+
+from .vector_renderer import set_vector_renderer
 
 
 def _open_lyrx(lyrx):
@@ -90,20 +91,18 @@ def _set_scale_visibility(layer, layer_def):
     layer.setMaximumScale(max_scale)
 
 
-def _set_credits(layer, layer_def):
+def _set_credits(layer, attribution):
     """Set the QGIS layer credits based on the ArcGIS layer definition."""
-    credits = layer_def.get("attribution", "")
-    if credits:
+    if attribution:
         md = layer.metadata()
-        md.setRights([credits])
+        md.setRights([attribution])
         layer.setMetadata(md)
 
 
-def _set_description(layer, layer_def):
+def _set_description(layer, description):
     """
     Set the QGIS layer description (abstract) based on the ArcGIS layer definition.
     """
-    description = layer_def.get("description", "")
     if description:
         md = layer.metadata()
         md.setAbstract(description)
@@ -121,18 +120,15 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     abs_uri, rel_uri = _parse_source(in_folder, f_table["dataConnection"], out_file)
     layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
 
-    _set_credits(layer, layer_def)
-    _set_description(layer, layer_def)
+    _set_credits(layer, layer_def["attribution"])
+    _set_description(layer, layer_def["description"])
     _set_scale_visibility(layer, layer_def)
+    set_vector_renderer(layer, layer_def["renderer"])
 
     # props = {
     #     "name": layer_def.get("name"),
-    #     "attribution": layer_def.get("attribution"),
-    #     "description": layer_def.get("description"),
     #     "expanded": layer_def.get("expanded", True),
-    #     "layerScaleVisibilityOptions": layer_def.get("layerScaleVisibilityOptions", {}),
     #     "visibility": layer_def.get("visibility", True),
-    #     "renderer": layer_def.get("renderer", {}),
     #     "labelClasses": layer_def.get("labelClasses", []),
     #     "featureTable": layer_def.get("featureTable", {})
     # }
@@ -150,47 +146,50 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     return layer
 
 
-def convert_lyrx(in_lyrx, out_folder=None):
+def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
+    """Convert an ArcGIS Pro .lyrx file to a QGIS .qlr file
+
+    Args:
+        in_lyrx (str): Path to the input .lyrx file.
+        out_folder (str, optional): Folder to save the output .qlr file. If not provided,
+            the output will be saved in the same folder as the input .lyrx file.
+        qgs (QgsApplication, optional): An initialized QgsApplication instance. If not provided,
+            a new instance will be created and initialized within this function.
+    """
     if not out_folder:
         out_folder = os.path.dirname(in_lyrx)
     in_folder = os.path.abspath(os.path.dirname(in_lyrx))
     out_file = os.path.join(out_folder, os.path.basename(in_lyrx).replace(".lyrx", ".qlr"))
 
-    lyrx = _open_lyrx(in_lyrx)
-    layer_uri = lyrx["layers"][0]
-    layer_def = next((ld for ld in lyrx.get("layerDefinitions", []) if ld.get("uRI") == layer_uri), {})
-    if layer_def.get("type") == "CIMFeatureLayer":
-        out_layer = _convert_feature_layer(in_folder, layer_def, out_file)
-    else:
-        raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
-
-    # Common properties
-    if "visibility" in layer_def:
-        out_layer.setVisible(layer_def["visibility"])
-    else:
-        out_layer.setVisible(False)
-    if "expanded" in layer_def:
-        out_layer.setExpanded(layer_def["expanded"])
-    else:
-        out_layer.setExpanded(False)
-
-    doc = QgsLayerDefinition.exportLayerDefinitionLayers([out_layer], QgsReadWriteContext())
-    with open(out_file, 'w', encoding='utf-8') as f:
-        f.write(doc.toString())
-
-
-if __name__ == "__main__":
-    output_folder = r'D:\GBDS\Map_Layers_QGIS'
-    in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
-
-    try:
+    manage_qgs = qgs is None
+    if manage_qgs:
         qgs = QgsApplication([], False)
         qgs.initQgis()
 
-        convert_lyrx(in_lyrx, output_folder)
+    try:
+        lyrx = _open_lyrx(in_lyrx)
+        layer_uri = lyrx["layers"][0]
+        layer_def = next((ld for ld in lyrx.get("layerDefinitions", []) if ld.get("uRI") == layer_uri), {})
+        if layer_def.get("type") == "CIMFeatureLayer":
+            out_layer = _convert_feature_layer(in_folder, layer_def, out_file)
+        else:
+            raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
+
+        # # Common properties
+        # if "visibility" in layer_def:
+        #     out_layer.setVisible(layer_def["visibility"])
+        # else:
+        #     out_layer.setVisible(False)
+        # if "expanded" in layer_def:
+        #     out_layer.setExpanded(layer_def["expanded"])
+        # else:
+        #     out_layer.setExpanded(False)
+
+        doc = QgsLayerDefinition.exportLayerDefinitionLayers([out_layer], QgsReadWriteContext())
+        with open(out_file, 'w', encoding='utf-8') as f:
+            f.write(doc.toString())
     except Exception as e:
         print(f"Error converting LYRX: {e}")
     finally:
-        qgs.exitQgis()
-
-    print('done')
+        if manage_qgs:
+            qgs.exitQgis()
