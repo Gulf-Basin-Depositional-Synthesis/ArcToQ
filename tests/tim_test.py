@@ -17,7 +17,7 @@ from arc_to_q.converters.lyrx_converter import convert_lyrx
 
 if __name__ == "__main__":
     output_folder = r'D:\GBDS\Map_Layers_QGIS'
-    in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
+    in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well label.lyrx'
 
     qgs = QgsApplication([], False)
     qgs.initQgis()

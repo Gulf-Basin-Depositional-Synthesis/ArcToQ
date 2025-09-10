@@ -6,18 +6,8 @@ from qgis.core import (
 )
 from qgis.PyQt.QtGui import QColor
 
-def _convert_color(arc_color: list) -> QColor:
-    """Converts an ArcGIS RGBA color list to a QGIS QColor object."""
-    if not arc_color or len(arc_color) != 4:
-        return QColor("black")
-    
-    r, g, b, a_percent = arc_color
-    r_int = int(r)
-    g_int = int(g)
-    b_int = int(b)
-    alpha_255 = int((a_percent / 100.0) * 255)
-    
-    return QColor(r_int, g_int, b_int, alpha_255)
+from arc_to_q.converters.utils import parse_color
+
 
 def _convert_simple_renderer(layer: QgsVectorLayer, renderer_def: dict):
     """
@@ -118,14 +108,14 @@ def _convert_simple_renderer(layer: QgsVectorLayer, renderer_def: dict):
         if is_line_shape:
             # For line shapes, the main color is the "fill" from Arc.
             # We apply this color to the QGIS stroke and make the fill transparent.
-            main_color = _convert_color(fill_color_list)
+            main_color = parse_color(fill_color_list)
             main_color.setAlpha(0) # Set fill to transparent
             symbol_layer.setColor(main_color)
-            symbol_layer.setStrokeColor(_convert_color(fill_color_list))
+            symbol_layer.setStrokeColor(parse_color(fill_color_list))
         else:
             # For polygon shapes, we use both fill and stroke from Arc.
-            symbol_layer.setColor(_convert_color(fill_color_list))
-            symbol_layer.setStrokeColor(_convert_color(stroke_color_list))
+            symbol_layer.setColor(parse_color(fill_color_list))
+            symbol_layer.setStrokeColor(parse_color(stroke_color_list))
 
         symbol_layer.setStrokeWidth(stroke_width)
         symbol_layer.setSize(size)

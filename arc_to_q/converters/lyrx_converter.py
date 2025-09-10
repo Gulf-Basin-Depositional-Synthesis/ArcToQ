@@ -12,6 +12,7 @@ from qgis.core import (
 )
 
 from arc_to_q.converters.symbology_converter import set_symbology
+from arc_to_q.converters.label_converter import set_labels
 
 
 def _open_lyrx(lyrx):
@@ -69,7 +70,7 @@ def _parse_source(in_folder, data_connection, out_file):
         raise NotImplementedError(f"Unsupported workspaceFactory: {factory}")
 
 
-def _set_scale_visibility(layer, layer_def):
+def _set_scale_visibility(layer: QgsVectorLayer, layer_def: dict):
     """Set the scale visibility for a QGIS layer based on the ArcGIS layer definition."""
     scale_opts = layer_def.get("layerScaleVisibilityOptions", {})
     if scale_opts:
@@ -146,22 +147,10 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     abs_uri, rel_uri = _parse_source(in_folder, f_table["dataConnection"], out_file)
     layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
 
-    # set_vector_renderer(layer, layer_def["renderer"])
-
     _set_display_field(layer, layer_def)
     set_symbology(layer, layer_def)
-    # props = {
-    #     "name": layer_def.get("name"),
-    #     "expanded": layer_def.get("expanded", True),
-    #     "visibility": layer_def.get("visibility", True),
-    #     "labelClasses": layer_def.get("labelClasses", []),
-    #     "featureTable": layer_def.get("featureTable", {})
-    # }
-    # if props["layerScaleVisibilityOptions"]["type"] != "CIMLayerScaleVisibilityOptions":
-    #     print(f"Unexpected layer scale visibility options type: {props['layerScaleVisibilityOptions']['type']}")
-    # if props["layerScaleVisibilityOptions"]["showLayerAtAllScales"] != True:
-    #     print(f"Layer scale visibility options do not show layer at all scales: {props['name']}")
-
+    # set_vector_renderer(layer, layer_def["renderer"])
+    set_labels(layer, layer_def)
 
     if not layer.isValid():
         raise RuntimeError(f"Layer failed to load: {layer_name}")
