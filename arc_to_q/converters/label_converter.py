@@ -28,6 +28,16 @@ def _parse_expression(expression: str) -> str:
     return expression
 
 
+def _color_from_symbol_layers(symbol_layers):
+    # Loop until we find a layer with type=CIMSolidFill
+    for layer in symbol_layers:
+        if layer.get("type") == "CIMSolidFill":
+            color = layer.get("color", {})
+            return parse_color(color)
+
+    return parse_color(None)
+
+
 def set_labels(layer: QgsVectorLayer, layer_def: dict):
     label_classes = layer_def.get("labelClasses", [])
     layer_name = layer_def.get('name', 'Unknown Layer')
@@ -43,6 +53,8 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
     expression = _parse_expression(label_class.get("expression", ""))
     text_symbol = label_class.get("textSymbol", {}).get("symbol", {})
     placement_props = label_class.get("maplexLabelPlacementProperties", {})
+    underline = text_symbol.get("underline", False)
+    strikeout = text_symbol.get("strikethrough", False)
 
     # --- Text Format ---
     text_format = QgsTextFormat()
@@ -51,12 +63,25 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
     font = QFont()
     font.setFamily(text_symbol.get("fontFamilyName", "Arial"))
     font.setPointSize(text_symbol.get("height", 8))
+
+    # Font style
+    font_style = text_symbol.get("fontStyleName", "").lower()
+    if "bold" in font_style:
+        font.setBold(True)
+    if "italic" in font_style:
+        font.setItalic(True)
+    if underline:
+        font.setUnderline(True)
+    if strikeout:
+        font.setStrikeOut(True)
+
+    # Apply font to text format
     text_format.setFont(font)
     text_format.setSize(text_symbol.get("height", 8))
 
     # Text color
-    cim_color = text_symbol["symbol"]["symbolLayers"][0]["color"]
-    text_format.setColor(parse_color(cim_color))
+    color = _color_from_symbol_layers(text_symbol["symbol"]["symbolLayers"])
+    text_format.setColor(color)
 
     # todo: # Halo / buffer
     # halo_size = text_symbol.get("haloSize")
