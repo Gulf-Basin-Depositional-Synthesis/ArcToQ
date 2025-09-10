@@ -139,9 +139,6 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     abs_uri, rel_uri = _parse_source(in_folder, f_table["dataConnection"], out_file)
     layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
 
-    _set_credits(layer, layer_def["attribution"])
-    _set_description(layer, layer_def["description"])
-    _set_scale_visibility(layer, layer_def)
     # set_vector_renderer(layer, layer_def["renderer"])
 
     _set_display_field(layer, layer_def)
@@ -196,12 +193,13 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         else:
             raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
 
-        # Common properties
-        visibility = layer_def.get("visibility", False)
-        expanded = layer_def.get("expanded", False)
+        # # Common properties
+        _set_credits(out_layer, layer_def["attribution"])
+        _set_description(out_layer, layer_def["description"])
+        _set_scale_visibility(out_layer, layer_def)
 
-        out_layer.setCustomProperty("legend/checked", visibility)
-        out_layer.setCustomProperty("legend/expanded", expanded)
+        # visibility = layer_def.get("visibility", False)
+        # expanded = layer_def.get("expanded", False)
 
         doc = QgsLayerDefinition.exportLayerDefinitionLayers([out_layer], QgsReadWriteContext())
         with open(out_file, 'w', encoding='utf-8') as f:
