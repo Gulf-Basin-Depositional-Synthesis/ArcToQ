@@ -12,8 +12,8 @@ from qgis.core import (
     QgsReadWriteContext
 )
 
-from display_field_converter import set_display_field
-from symbology_converter import set_symbology
+from arc_to_q.converters.display_field_converter import set_display_field
+from arc_to_q.converters.symbology_converter import set_symbology
 
 
 def _open_lyrx(lyrx):

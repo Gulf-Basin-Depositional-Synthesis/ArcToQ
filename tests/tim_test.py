@@ -1,24 +1,18 @@
 """Tim's testing script.
     PowerShell
     CD to ArcToQ folder
-    & "C:\Program Files\QGIS 3.40.10\bin\python-qgis-ltr.bat" -m arc_to_q.converters.tim
+    & "C:\Program Files\QGIS 3.40.10\bin\python-qgis-ltr.bat" .\tests\tim_test.py
 """
 
-
-# import sys
-# import os
-
-# # Add the parent directory of arc_to_q to the Python path
-# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# from arc_to_q.converters import lyrx_converter
-
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from qgis.core import (
     QgsApplication
 )
 
-from .lyrx_converter import convert_lyrx
+from arc_to_q.converters.lyrx_converter import convert_lyrx
 
 
 if __name__ == "__main__":
