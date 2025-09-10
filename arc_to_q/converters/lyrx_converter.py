@@ -155,30 +155,50 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     return layer
 
 
-def convert_lyrx(in_lyrx, out_folder=None):
+def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
+    """Convert an ArcGIS Pro .lyrx file to a QGIS .qlr file
+
+    Args:
+        in_lyrx (str): Path to the input .lyrx file.
+        out_folder (str, optional): Folder to save the output .qlr file. If not provided,
+            the output will be saved in the same folder as the input .lyrx file.
+        qgs (QgsApplication, optional): An initialized QgsApplication instance. If not provided,
+            a new instance will be created and initialized within this function.
+    """
     if not out_folder:
         out_folder = os.path.dirname(in_lyrx)
     in_folder = os.path.abspath(os.path.dirname(in_lyrx))
     out_file = os.path.join(out_folder, os.path.basename(in_lyrx).replace(".lyrx", ".qlr"))
 
-    lyrx = _open_lyrx(in_lyrx)
-    layer_uri = lyrx["layers"][0]
-    layer_def = next((ld for ld in lyrx.get("layerDefinitions", []) if ld.get("uRI") == layer_uri), {})
-    if layer_def.get("type") == "CIMFeatureLayer":
-        out_layer = _convert_feature_layer(in_folder, layer_def, out_file)
-    else:
-        raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
+    manage_qgs = qgs is None
+    if manage_qgs:
+        qgs = QgsApplication([], False)
+        qgs.initQgis()
 
-    # Common properties
-    visibility = layer_def.get("visibility", False)
-    expanded = layer_def.get("expanded", False)
+    try:
+        lyrx = _open_lyrx(in_lyrx)
+        layer_uri = lyrx["layers"][0]
+        layer_def = next((ld for ld in lyrx.get("layerDefinitions", []) if ld.get("uRI") == layer_uri), {})
+        if layer_def.get("type") == "CIMFeatureLayer":
+            out_layer = _convert_feature_layer(in_folder, layer_def, out_file)
+        else:
+            raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
 
-    out_layer.setCustomProperty("legend/checked", visibility)
-    out_layer.setCustomProperty("legend/expanded", expanded)
+        # Common properties
+        visibility = layer_def.get("visibility", False)
+        expanded = layer_def.get("expanded", False)
 
-    doc = QgsLayerDefinition.exportLayerDefinitionLayers([out_layer], QgsReadWriteContext())
-    with open(out_file, 'w', encoding='utf-8') as f:
-        f.write(doc.toString())
+        out_layer.setCustomProperty("legend/checked", visibility)
+        out_layer.setCustomProperty("legend/expanded", expanded)
+
+        doc = QgsLayerDefinition.exportLayerDefinitionLayers([out_layer], QgsReadWriteContext())
+        with open(out_file, 'w', encoding='utf-8') as f:
+            f.write(doc.toString())
+    except Exception as e:
+        print(f"Error converting LYRX: {e}")
+    finally:
+        if manage_qgs:
+            qgs.exitQgis()
 
 
 if __name__ == "__main__":
@@ -189,7 +209,7 @@ if __name__ == "__main__":
         qgs = QgsApplication([], False)
         qgs.initQgis()
 
-        convert_lyrx(in_lyrx, output_folder)
+        convert_lyrx(in_lyrx, output_folder, qgs)
     except Exception as e:
         print(f"Error converting LYRX: {e}")
     finally:
