@@ -9,6 +9,23 @@ from qgis.core import (
 )
 from PyQt5.QtGui import QFont
 
+from arc_to_q.converters.utils import parse_color
+
+
+def _parse_expression(expression: str) -> str:
+    """Convert ArcGIS label expression to QGIS expression.
+    
+    Args:
+        expression (str): The label expression from ArcGIS Pro.
+
+    Returns:
+        str: The converted expression for QGIS.
+    """
+    if " " in expression:
+        raise Exception(f"Complex label expressions with spaces are not supported: {expression}")
+    # Remove ArcGIS characters that QGIS does not use
+    expression = expression.replace("[", "").replace("]", "")
+    return expression
 
 
 def set_labels(layer: QgsVectorLayer, layer_def: dict):
@@ -23,32 +40,33 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
         raise Exception(f"Multiple label classes found for layer: {layer_name}. Only one is supported.")
 
     label_class = label_classes[0]
-    expression = label_class.get("expression", "")
+    expression = _parse_expression(label_class.get("expression", ""))
     text_symbol = label_class.get("textSymbol", {}).get("symbol", {})
     placement_props = label_class.get("maplexLabelPlacementProperties", {})
 
     # --- Text Format ---
     text_format = QgsTextFormat()
+
+    # Font
     font = QFont()
     font.setFamily(text_symbol.get("fontFamilyName", "Arial"))
     font.setPointSize(text_symbol.get("height", 8))
     text_format.setFont(font)
 
     # Text color
-    color_values = text_symbol.get("shadowColor", {}).get("values")
-    if color_values and len(color_values) >= 3:
-        text_format.setColor(QgsTextRenderer.colorFromRgb(*color_values[:3]))
+    cim_color = text_symbol["symbol"]["symbolLayers"][0]["color"]
+    text_format.setColor(parse_color(cim_color))
 
-    # Halo / buffer
-    halo_size = text_symbol.get("haloSize")
-    if halo_size and halo_size > 0:
-        buffer_settings = QgsTextBufferSettings()
-        buffer_settings.setEnabled(True)
-        buffer_settings.setSize(halo_size)
-        buffer_color = text_symbol.get("shadowColor", {}).get("values")
-        if buffer_color and len(buffer_color) >= 3:
-            buffer_settings.setColor(QgsTextRenderer.colorFromRgb(*buffer_color[:3]))
-        text_format.setBuffer(buffer_settings)
+    # todo: # Halo / buffer
+    # halo_size = text_symbol.get("haloSize")
+    # if halo_size and halo_size > 0:
+    #     buffer_settings = QgsTextBufferSettings()
+    #     buffer_settings.setEnabled(True)
+    #     buffer_settings.setSize(halo_size)
+    #     buffer_color = text_symbol.get("shadowColor", {}).get("values")
+    #     if buffer_color and len(buffer_color) >= 3:
+    #         buffer_settings.setColor(QgsTextRenderer.colorFromRgb(*buffer_color[:3]))
+    #     text_format.setBuffer(buffer_settings)
 
     # --- Label Settings ---
     labeling = QgsPalLayerSettings()
