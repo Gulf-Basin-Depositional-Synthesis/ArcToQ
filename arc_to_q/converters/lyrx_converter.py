@@ -12,7 +12,6 @@ from qgis.core import (
     QgsReadWriteContext
 )
 
-from arc_to_q.converters.display_field_converter import set_display_field
 from arc_to_q.converters.symbology_converter import set_symbology
 
 
@@ -113,6 +112,25 @@ def _set_description(layer, layer_def):
         layer.setMetadata(md)
 
 
+def _set_display_field(layer: QgsVectorLayer, layer_def: dict):
+    """
+    Sets the display field (or "Display Name") for a QGIS layer.
+
+    In ArcGIS Pro, the "display field" controls what text is shown when using
+    the Identify tool. In QGIS, this is called the "Display Name".
+
+    Args:
+        layer (QgsVectorLayer): The in-memory QGIS layer object to modify.
+        layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
+    """
+    # In the LYRX JSON, the display field is usually under featureTable
+    feature_table = layer_def.get("featureTable", {})
+    display_field = feature_table.get("displayField")
+
+    if display_field and layer:
+        layer.setDisplayExpression(f'"{display_field}"')
+
+
 def _convert_feature_layer(in_folder, layer_def, out_file):
     layer_name = layer_def['name']
     if layer_def["useSourceMetadata"] == True:
@@ -128,7 +146,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     _set_description(layer, layer_def)
     _set_scale_visibility(layer, layer_def)
 
-    set_display_field(layer, layer_def)
+    _set_display_field(layer, layer_def)
     set_symbology(layer, layer_def)
     # props = {
     #     "name": layer_def.get("name"),
