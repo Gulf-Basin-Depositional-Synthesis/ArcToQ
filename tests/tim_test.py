@@ -22,10 +22,11 @@ if __name__ == "__main__":
     in_lyrx = r'D:\GBDS\Map_Layers\Basemap\Topography and Bathmetry Contours.lyrx'  # [Feet]+ " ft (" + [Meters] + " m)"
     pdi_lyrx = r'D:\GBDS\Map_Layers\Third_Party\PDI Well.lyrx'  # $feature.RECORD
     in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
+    # plss
 
 
     layers = [
-        in_lyrx,
+        pdi_lyrx,
     ]
 
     qgs = QgsApplication([], False)

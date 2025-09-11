@@ -100,18 +100,21 @@ def _set_metadata(layer: QgsVectorLayer, layer_def: dict):
         layer (QgsVectorLayer): The in-memory QGIS layer object to modify.
         layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
     """
-    attribution = layer_def.get("attribution", "")
-    description = layer_def.get("description", "")
-    title = layer_def.get("name", "")
-
     md = layer.metadata()
-
-    if attribution:
-        md.setRights([attribution])
-    if description:
-        md.setAbstract(description)
+    title = layer_def.get("name", "")
     if title:
         md.setTitle(title)
+
+    if layer_def.get("useSourceMetadata", False) == False:
+        attribution = layer_def.get("attribution", "")
+        description = layer_def.get("description", "")
+        if attribution:
+            md.setRights([attribution])
+        if description:
+            md.setAbstract(description)
+    else:
+        attribution = ""
+        description = ""
 
     if attribution or description or title:
         layer.setMetadata(md)
@@ -138,8 +141,6 @@ def _set_display_field(layer: QgsVectorLayer, layer_def: dict):
 
 def _convert_feature_layer(in_folder, layer_def, out_file):
     layer_name = layer_def['name']
-    if layer_def["useSourceMetadata"] == True:
-        raise Exception(f"Unhandled: Layer uses source metadata: {layer_name}")
     f_table = layer_def["featureTable"]
     if f_table["type"] != "CIMFeatureTable":
         raise Exception(f"Unexpected feature table type: {f_table['type']}")
