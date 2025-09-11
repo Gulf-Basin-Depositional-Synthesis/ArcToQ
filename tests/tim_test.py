@@ -20,12 +20,12 @@ if __name__ == "__main__":
     in_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\22_UM\Well Interval Thickness.lyrx'
     ref_lyrx = r'D:\GBDS\Map_Layers\Regional_Geology\Reference Publication.lyrx'  # [References.Title]
     in_lyrx = r'D:\GBDS\Map_Layers\Basemap\Topography and Bathmetry Contours.lyrx'  # [Feet]+ " ft (" + [Meters] + " m)"
-    pdi_lyrx = r'D:\GBDS\Map_Layers\Third_Party\PDI Well.lyrx'  # $feature.RECORD
     in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
+    # plss
 
 
     layers = [
-        in_lyrx,
+        ref_lyrx,
     ]
 
     qgs = QgsApplication([], False)
