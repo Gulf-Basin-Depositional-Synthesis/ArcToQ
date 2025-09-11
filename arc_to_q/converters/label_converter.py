@@ -5,6 +5,7 @@ from qgis.core import (
     QgsTextBufferSettings,
     QgsVectorLayerSimpleLabeling,
     QgsTextRenderer,
+    QgsRuleBasedLabeling,
     QgsProperty
 )
 from PyQt5.QtGui import QFont
@@ -12,37 +13,81 @@ from PyQt5.QtGui import QFont
 from arc_to_q.converters.utils import parse_color
 
 
-def _parse_expression(expression: str) -> str:
-    """Convert ArcGIS label expression to QGIS expression.
+def _parse_vbscript_expression(expression: str) -> str:
+    """Convert a simple VBScript expression to QGIS expression.
+    
+    E.g., [Transect_Name] to Transect_Name
     
     Args:
-        expression (str): The label expression from ArcGIS Pro.
+        expression (str): The VBScript expression from ArcGIS Pro.
 
     Returns:
         str: The converted expression for QGIS.
     """
-    if " " in expression:
-        raise Exception(f"Complex label expressions with spaces are not supported: {expression}")
-    # Remove ArcGIS characters that QGIS does not use
+    # Remove brackets used in VBScript for field names
     expression = expression.replace("[", "").replace("]", "")
     return expression
 
 
-def set_labels(layer: QgsVectorLayer, layer_def: dict):
-    label_classes = layer_def.get("labelClasses", [])
-    layer_name = layer_def.get('name', 'Unknown Layer')
+def _parse_arcade_expression(expression: str) -> str:
+    """Convert a simple Arcade expression to QGIS expression.
+    
+    Examples:
+        $feature.CommonName
+        $feature['CommonName']
+    
+    Args:
+        expression (str): The Arcade expression from ArcGIS Pro.
 
-    if not label_classes:
-        print(f"No label classes found for layer: {layer_name}")
-        return
+    Returns:
+        str: The converted expression for QGIS.
+    """
+    # Remove $feature['field'] prefix used in Arcade for field names
+    if expression.startswith("$feature['") and expression.endswith("']"):
+        expression = expression[len("$feature['"):-len("']")]
+    elif expression.startswith("$feature."):
+        expression = expression[len("$feature."):]
 
-    if len(label_classes) > 1:
-        raise Exception(f"Multiple label classes found for layer: {layer_name}. Only one is supported.")
+    return expression
 
-    label_class = label_classes[0]
-    expression = _parse_expression(label_class.get("expression", ""))
+
+def _parse_expression(expression: str, express_engine: str) -> str:
+    """Convert ArcGIS label expression to QGIS expression.
+    
+    Args:
+        expression (str): The label expression from ArcGIS Pro.
+        express_engine (str): The expression engine used (e.g., "Arcade", "VBScript", "Python").
+
+    Returns:
+        str: The converted expression for QGIS.
+    """
+    expression = expression.strip()
+
+    if express_engine == "Arcade":
+        return _parse_arcade_expression(expression)
+    elif express_engine == "VBScript":
+        return _parse_vbscript_expression(expression)
+    else:
+        # Default behavior: remove ArcGIS-specific characters
+        return expression.replace("[", "").replace("]", "")
+
+
+def _color_from_symbol_layers(symbol_layers):
+    # Loop until we find a layer with type=CIMSolidFill
+    for layer in symbol_layers:
+        if layer.get("type") == "CIMSolidFill":
+            color = layer.get("color", {})
+            return parse_color(color)
+
+    return parse_color(None)
+
+
+def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
+    expression = _parse_expression(label_class.get("expression", ""), label_class.get("expressionEngine", "Arcade"))
     text_symbol = label_class.get("textSymbol", {}).get("symbol", {})
     placement_props = label_class.get("maplexLabelPlacementProperties", {})
+    underline = text_symbol.get("underline", False)
+    strikeout = text_symbol.get("strikethrough", False)
 
     # --- Text Format ---
     text_format = QgsTextFormat()
@@ -51,22 +96,25 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
     font = QFont()
     font.setFamily(text_symbol.get("fontFamilyName", "Arial"))
     font.setPointSize(text_symbol.get("height", 8))
+
+    # Font style
+    font_style = text_symbol.get("fontStyleName", "").lower()
+    if "bold" in font_style:
+        font.setBold(True)
+    if "italic" in font_style:
+        font.setItalic(True)
+    if underline:
+        font.setUnderline(True)
+    if strikeout:
+        font.setStrikeOut(True)
+
+    # Apply font to text format
     text_format.setFont(font)
+    text_format.setSize(text_symbol.get("height", 8))
 
     # Text color
-    cim_color = text_symbol["symbol"]["symbolLayers"][0]["color"]
-    text_format.setColor(parse_color(cim_color))
-
-    # todo: # Halo / buffer
-    # halo_size = text_symbol.get("haloSize")
-    # if halo_size and halo_size > 0:
-    #     buffer_settings = QgsTextBufferSettings()
-    #     buffer_settings.setEnabled(True)
-    #     buffer_settings.setSize(halo_size)
-    #     buffer_color = text_symbol.get("shadowColor", {}).get("values")
-    #     if buffer_color and len(buffer_color) >= 3:
-    #         buffer_settings.setColor(QgsTextRenderer.colorFromRgb(*buffer_color[:3]))
-    #     text_format.setBuffer(buffer_settings)
+    color = _color_from_symbol_layers(text_symbol["symbol"]["symbolLayers"])
+    text_format.setColor(color)
 
     # --- Label Settings ---
     labeling = QgsPalLayerSettings()
@@ -101,11 +149,50 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
             labeling.placement = QgsPalLayerSettings.Curved
         elif line_method == "OffsetStraightFromLine":
             labeling.placement = QgsPalLayerSettings.Parallel
+        elif line_method == "CenteredStraightOnLine":
+            labeling.placement = QgsPalLayerSettings.Line
+            labeling.placementFlags = QgsPalLayerSettings.OnLine | QgsPalLayerSettings.MapOrientation
         else:
             labeling.placement = QgsPalLayerSettings.Line
 
-    # Apply labeling
-    layer.setLabeling(QgsVectorLayerSimpleLabeling(labeling))
+    return labeling
+
+
+def _parse_where_clause(where: str) -> str:
+    """Convert ArcGIS where clause to QGIS expression.
+    
+    Example:
+    "\"WellData_GeoSetting\" NOT in (1,2)"
+    to
+    "\"WellData_GeoSetting\" NOT IN (1,2)"
+    """
+    return where
+
+
+def set_labels(layer: QgsVectorLayer, layer_def: dict):
+    label_classes = layer_def.get("labelClasses", [])
+    layer_name = layer_def.get('name', 'Unknown Layer')
+
+    if not label_classes:
+        print(f"No label classes found for layer: {layer_name}")
+        return
+
+    if len(label_classes) > 1:
+        root_rule = QgsRuleBasedLabeling.Rule(QgsPalLayerSettings())
+        for label_class in label_classes:
+            where = _parse_where_clause(label_class.get("whereClause", ""))
+            labeling = _make_label_settings(label_class)
+            rule = QgsRuleBasedLabeling.Rule(labeling)
+            if where:
+                rule.setFilterExpression(where)
+            root_rule.appendChild(rule)
+
+        labeling = QgsRuleBasedLabeling(root_rule)
+        layer.setLabeling(labeling)
+    else:
+        labeling = _make_label_settings(label_classes[0])
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(labeling))
+
     visibility = layer_def.get("labelVisibility", False)
     layer.setLabelsEnabled(visibility)
 
