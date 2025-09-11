@@ -18,14 +18,14 @@ from arc_to_q.converters.lyrx_converter import convert_lyrx
 if __name__ == "__main__":
     output_folder = r'D:\GBDS\Map_Layers_QGIS'
     in_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\22_UM\Well Interval Thickness.lyrx'
-    ref_lyrx = r'D:\GBDS\Map_Layers\Regional_Geology\Reference Publication.lyrx'  # [References.Title]
-    in_lyrx = r'D:\GBDS\Map_Layers\Basemap\Topography and Bathmetry Contours.lyrx'  # [Feet]+ " ft (" + [Meters] + " m)"
     in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
+    in_lyrx = r'D:\GBDS\Map_Layers\Basemap\Topography and Bathmetry Contours.lyrx'  # [Feet]+ " ft (" + [Meters] + " m)"
+    in_lyrx = r'D:\GBDS\Map_Layers\Political labels.lyrx'
     # plss
 
 
     layers = [
-        ref_lyrx,
+        in_lyrx,
     ]
 
     qgs = QgsApplication([], False)

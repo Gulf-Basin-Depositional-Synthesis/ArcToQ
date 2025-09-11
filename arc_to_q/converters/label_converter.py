@@ -188,6 +188,8 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
             rule = QgsRuleBasedLabeling.Rule(labeling)
             if where:
                 rule.setFilterExpression(where)
+            visibility = label_class.get("visibility", False)
+            rule.setActive(visibility)
             root_rule.appendChild(rule)
 
         labeling = QgsRuleBasedLabeling(root_rule)
