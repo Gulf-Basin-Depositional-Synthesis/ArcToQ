@@ -19,6 +19,9 @@ if __name__ == "__main__":
     output_folder = r'D:\GBDS\Map_Layers_QGIS'
     in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
     in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well label.lyrx'
+    in_lyrx = r'D:\GBDS\Map_Layers\contour.lyrx'
+    in_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\22_UM\Well Interval Thickness.lyrx'
+    
 
     qgs = QgsApplication([], False)
     qgs.initQgis()

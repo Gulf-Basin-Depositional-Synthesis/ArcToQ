@@ -12,20 +12,61 @@ from PyQt5.QtGui import QFont
 from arc_to_q.converters.utils import parse_color
 
 
-def _parse_expression(expression: str) -> str:
-    """Convert ArcGIS label expression to QGIS expression.
+def _parse_vbscript_expression(expression: str) -> str:
+    """Convert a simple VBScript expression to QGIS expression.
+    
+    Note: This function only handles very simple expressions without spaces or complex logic.
     
     Args:
-        expression (str): The label expression from ArcGIS Pro.
+        expression (str): The VBScript expression from ArcGIS Pro.
 
     Returns:
         str: The converted expression for QGIS.
     """
-    if " " in expression:
-        raise Exception(f"Complex label expressions with spaces are not supported: {expression}")
-    # Remove ArcGIS characters that QGIS does not use
+    # Remove brackets used in VBScript for field names
     expression = expression.replace("[", "").replace("]", "")
     return expression
+
+
+def _parse_arcade_expression(expression: str) -> str:
+    """Convert a simple Arcade expression to QGIS expression.
+    
+    Note: This function only handles very simple expressions without spaces or complex logic.
+    
+    Args:
+        expression (str): The Arcade expression from ArcGIS Pro.
+
+    Returns:
+        str: The converted expression for QGIS.
+    """
+    # Remove $feature['field'] prefix used in Arcade for field names
+    if expression.startswith("$feature['") and expression.endswith("']"):
+        expression = expression[len("$feature['"):-len("']")]
+
+    return expression
+
+
+def _parse_expression(expression: str, express_engine: str) -> str:
+    """Convert ArcGIS label expression to QGIS expression.
+    
+    Args:
+        expression (str): The label expression from ArcGIS Pro.
+        express_engine (str): The expression engine used (e.g., "Arcade", "VBScript", "Python").
+
+    Returns:
+        str: The converted expression for QGIS.
+    """
+    expression = expression.strip()
+    if " " in expression:
+        raise Exception(f"Complex label expressions with spaces are not supported: {expression}")
+
+    if express_engine == "Arcade":
+        return _parse_arcade_expression(expression)
+    elif express_engine == "VBScript":
+        return _parse_vbscript_expression(expression)
+    else:
+        # Default behavior: remove ArcGIS-specific characters
+        return expression.replace("[", "").replace("]", "")
 
 
 def _color_from_symbol_layers(symbol_layers):
@@ -50,7 +91,7 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
         raise Exception(f"Multiple label classes found for layer: {layer_name}. Only one is supported.")
 
     label_class = label_classes[0]
-    expression = _parse_expression(label_class.get("expression", ""))
+    expression = _parse_expression(label_class.get("expression", ""), label_class.get("expressionEngine", "Arcade"))
     text_symbol = label_class.get("textSymbol", {}).get("symbol", {})
     placement_props = label_class.get("maplexLabelPlacementProperties", {})
     underline = text_symbol.get("underline", False)
@@ -127,6 +168,9 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
             labeling.placement = QgsPalLayerSettings.Curved
         elif line_method == "OffsetStraightFromLine":
             labeling.placement = QgsPalLayerSettings.Parallel
+        elif line_method == "CenteredStraightOnLine":
+            labeling.placement = QgsPalLayerSettings.Line
+            labeling.placementFlags = QgsPalLayerSettings.OnLine | QgsPalLayerSettings.MapOrientation
         else:
             labeling.placement = QgsPalLayerSettings.Line
 
