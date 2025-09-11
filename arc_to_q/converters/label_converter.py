@@ -140,7 +140,7 @@ def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
         if polygon_method == "CurvedInPolygon":
             labeling.placement = QgsPalLayerSettings.CurvedPolygon
         elif polygon_method == "HorizontalInPolygon":
-            labeling.placement = QgsPalLayerSettings.HorizontalPolygon
+            labeling.placement = QgsPalLayerSettings.Placement.Horizontal
         else:
             labeling.placement = QgsPalLayerSettings.FreePolygon
 
