@@ -11,7 +11,8 @@ from qgis.core import (
     QgsReadWriteContext
 )
 
-from arc_to_q.converters.symbology_converter import set_symbology
+#from arc_to_q.converters.symbology_converter import set_symbology
+from arc_to_q.converters.vector.vector_renderer import RendererFactory
 from arc_to_q.converters.label_converter import set_labels
 
 
@@ -148,7 +149,15 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
 
     _set_display_field(layer, layer_def)
-    set_symbology(layer, layer_def)
+
+    renderer_factory = RendererFactory()
+    # Create the renderer using the factory
+    renderer_def = layer_def.get("renderer", {})
+    qgis_renderer = renderer_factory.create_renderer(renderer_def, layer)
+
+    # Apply the created renderer to the layer
+    layer.setRenderer(qgis_renderer)
+    
     # set_vector_renderer(layer, layer_def["renderer"])
     set_labels(layer, layer_def)
 
