@@ -17,17 +17,23 @@ from arc_to_q.converters.lyrx_converter import convert_lyrx
 
 if __name__ == "__main__":
     output_folder = r'D:\GBDS\Map_Layers_QGIS'
-    in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
-    in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well label.lyrx'
-    in_lyrx = r'D:\GBDS\Map_Layers\contour.lyrx'
     in_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\22_UM\Well Interval Thickness.lyrx'
-    
+    ref_lyrx = r'D:\GBDS\Map_Layers\Regional_Geology\Reference Publication.lyrx'  # [References.Title]
+    in_lyrx = r'D:\GBDS\Map_Layers\Basemap\Topography and Bathmetry Contours.lyrx'  # [Feet]+ " ft (" + [Meters] + " m)"
+    pdi_lyrx = r'D:\GBDS\Map_Layers\Third_Party\PDI Well.lyrx'  # $feature.RECORD
+    in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
+
+
+    layers = [
+        in_lyrx,
+    ]
 
     qgs = QgsApplication([], False)
     qgs.initQgis()
 
     try:
-        convert_lyrx(in_lyrx, output_folder, qgs)
+        for lyrx in layers:
+            convert_lyrx(lyrx, output_folder, qgs)
     except Exception as e:
         print(f"oops: {e}")
     finally:
