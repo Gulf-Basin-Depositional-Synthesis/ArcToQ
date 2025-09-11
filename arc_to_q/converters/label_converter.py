@@ -26,6 +26,9 @@ def _parse_vbscript_expression(expression: str) -> str:
     """
     # Remove brackets used in VBScript for field names
     expression = expression.replace("[", "").replace("]", "")
+    # If "." in expression, it might be a table.field reference; remove table prefix
+    if "." in expression:
+        expression = expression.split(".")[-1]
     return expression
 
 
