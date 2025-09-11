@@ -130,6 +130,7 @@ def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
     point_method = placement_props.get("pointPlacementMethod")
     polygon_method = placement_props.get("polygonPlacementMethod")
     line_method = placement_props.get("linePlacementMethod")
+    can_overrun_feature = placement_props.get("canOverrunFeature", True)
 
     if feature_type == "Point":
         if point_method == "AroundPoint":
@@ -157,6 +158,9 @@ def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
             labeling.placementFlags = QgsPalLayerSettings.OnLine | QgsPalLayerSettings.MapOrientation
         else:
             labeling.placement = QgsPalLayerSettings.Line
+
+    if not can_overrun_feature:
+        labeling.priority = 4
 
     return labeling
 

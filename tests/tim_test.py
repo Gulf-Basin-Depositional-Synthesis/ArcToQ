@@ -20,6 +20,7 @@ if __name__ == "__main__":
     in_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\22_UM\Well Interval Thickness.lyrx'
     in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
     in_lyrx = r'D:\GBDS\Map_Layers\Basemap\Topography and Bathmetry Contours.lyrx'  # [Feet]+ " ft (" + [Meters] + " m)"
+    in_lyrx = r'D:\GBDS\Map_Layers\contour with expr.lyrx'
     in_lyrx = r'D:\GBDS\Map_Layers\Political labels.lyrx'
     # plss
 
