@@ -112,13 +112,13 @@ class SymbolFactory:
             marker_symbol.appendSymbolLayer(SymbolFactory._create_default_marker_layer())
             return marker_symbol
 
-        # --- START: NEW SINGLE-LAYER LOGIC ---
         marker_layer = QgsSimpleMarkerSymbolLayer()
 
         # Set basic properties: size and shape
         size = vector_marker_def.get("size", 6.0)
         shape = SymbolFactory._determine_marker_shape(vector_marker_def)
         marker_layer.setSize(size)
+        marker_layer.setSizeUnit(QgsUnitTypes.RenderPoints)
         marker_layer.setShape(shape)
 
         # Find the nested fill and stroke definitions from the JSON
@@ -147,13 +147,13 @@ class SymbolFactory:
                 marker_layer.setStrokeStyle(Qt.SolidLine)
                 marker_layer.setStrokeColor(stroke_color)
                 marker_layer.setStrokeWidth(stroke_width)
+                marker_layer.setStrokeWidthUnit(QgsUnitTypes.RenderPoints)
             else:
                 marker_layer.setStrokeStyle(Qt.NoPen)
         else:
             marker_layer.setStrokeStyle(Qt.NoPen)
         
         marker_symbol.appendSymbolLayer(marker_layer)
-        # --- END: NEW LOGIC ---
 
         return marker_symbol
             
@@ -248,6 +248,7 @@ class SymbolFactory:
         if stroke_color:
             fill_layer.setStrokeColor(stroke_color)
             fill_layer.setStrokeWidth(stroke_width)
+            fill_layer.setStrokeWidthUnit(QgsUnitTypes.RenderPoints)
         else:
             fill_layer.setStrokeColor(QColor(0, 0, 0, 100))  # Default black stroke
         
@@ -267,6 +268,7 @@ class SymbolFactory:
             # Set width
             width = layer_def.get("width", 0.5)
             line_layer.setWidth(width)
+            line_layer.setWidthUnit(QgsUnitTypes.RenderPoints)
             
             # Set line style (if available in the future)
             # line_style = layer_def.get("lineStyle", "Solid")
