@@ -90,11 +90,11 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
 
     elif feature_type == "Polygon":
         if polygon_method == "CurvedInPolygon":
-            labeling.placement = QgsPalLayerSettings.CurvedPolygon
+            labeling.placement = QgsPalLayerSettings.Curved # Was CurvedPolygon
         elif polygon_method == "HorizontalInPolygon":
-            labeling.placement = QgsPalLayerSettings.HorizontalPolygon
+            labeling.placement = QgsPalLayerSettings.Horizontal # Was HorizontalPolygon
         else:
-            labeling.placement = QgsPalLayerSettings.FreePolygon
+            labeling.placement = QgsPalLayerSettings.Free # Was FreePolygon
 
     elif feature_type == "Line":
         if line_method == "OffsetCurvedFromLine":

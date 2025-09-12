@@ -203,55 +203,45 @@ class SymbolFactory:
     def create_fill_symbol(symbol_def: Dict[str, Any]) -> QgsFillSymbol:
         """
         Create a QGIS fill symbol from an ArcGIS polygon/fill symbol definition.
-        
-        Args:
-            symbol_def: ArcGIS CIM fill symbol definition
-            
-        Returns:
-            QgsFillSymbol: The created fill symbol
+        This version correctly handles symbols with no fill (hollow).
         """
         fill_symbol = QgsFillSymbol()
         fill_symbol.deleteSymbolLayer(0)  # Remove default layer
-        
+
         symbol_layers = symbol_def.get("symbolLayers", [])
         if not symbol_layers:
-            # Create a default simple fill if no layers defined
-            default_layer = SymbolFactory._create_default_fill_layer()
-            fill_symbol.appendSymbolLayer(default_layer)
+            # Create a default simple fill if no layers are defined at all
+            fill_symbol.appendSymbolLayer(SymbolFactory._create_default_fill_layer())
             return fill_symbol
-        
-        # Extract fill and stroke properties from all layers
-        fill_color = None
-        stroke_color = None
-        stroke_width = 0.26
-        
-        for layer_def in symbol_layers:
-            if not layer_def.get("enable", True):
-                continue
-                
-            layer_type = layer_def.get("type")
-            
-            if layer_type == "CIMSolidFill":
-                fill_color = parse_color(layer_def.get("color"))
-            elif layer_type == "CIMSolidStroke":
-                stroke_color = parse_color(layer_def.get("color"))
-                stroke_width = layer_def.get("width", stroke_width)
-        
-        # Create the fill layer with extracted properties
+
+        # Explicitly find the fill and stroke definitions from the symbol layers
+        fill_def = next((layer for layer in symbol_layers if layer.get("type") == "CIMSolidFill" and layer.get("enable", True)), None)
+        stroke_def = next((layer for layer in symbol_layers if layer.get("type") == "CIMSolidStroke" and layer.get("enable", True)), None)
+
         fill_layer = QgsSimpleFillSymbolLayer()
-        
-        if fill_color:
-            fill_layer.setFillColor(fill_color)
+
+        # 1. Configure the FILL (Interior)
+        if fill_def:
+            fill_color = parse_color(fill_def.get("color"))
+            if fill_color:
+                fill_layer.setFillColor(fill_color)
         else:
-            fill_layer.setFillColor(QColor(128, 128, 128, 100))  # Default gray fill
-            
-        if stroke_color:
-            fill_layer.setStrokeColor(stroke_color)
+            # THIS IS THE FIX: If no fill is defined, set the style to NoBrush.
+            fill_layer.setBrushStyle(Qt.NoBrush)
+
+        # 2. Configure the STROKE (Outline)
+        if stroke_def:
+            stroke_color = parse_color(stroke_def.get("color"))
+            stroke_width = stroke_def.get("width", 0.26)
+            if stroke_color:
+                fill_layer.setStrokeColor(stroke_color)
             fill_layer.setStrokeWidth(stroke_width)
             fill_layer.setStrokeWidthUnit(QgsUnitTypes.RenderPoints)
+            # The default stroke style is Qt.SolidLine, which is what we want.
         else:
-            fill_layer.setStrokeColor(QColor(0, 0, 0, 100))  # Default black stroke
-        
+            # If no stroke is defined either, explicitly set style to NoPen.
+            fill_layer.setStrokeStyle(Qt.NoPen)
+
         fill_symbol.appendSymbolLayer(fill_layer)
         return fill_symbol
     
