@@ -79,6 +79,8 @@ class RendererFactory:
                 return self._create_categorized_renderer(renderer_def, layer)
             elif renderer_type == "CIMClassBreaksRenderer":
                 return self._create_graduated_renderer(renderer_def, layer)
+            elif renderer_type == "CIMProportionalRenderer":
+                return self._create_proportional_renderer(renderer_def, layer)
             elif renderer_type == "CIMRuleBasedRenderer":
                 return self._create_rule_based_renderer(renderer_def, layer)
             else:
@@ -240,6 +242,57 @@ class RendererFactory:
             return renderer
 
         raise RendererCreationError("No 'fieldNames' or 'valueExpressionInfo' key found in the renderer definition.")
+    
+    def _create_proportional_renderer(self, renderer_def: Dict[str, Any],
+                                      layer: QgsVectorLayer) -> QgsSingleSymbolRenderer:
+        """
+        Creates a QGIS single symbol renderer with a data-defined size override
+        from an ArcGIS CIMProportionalRenderer definition.
+        """
+        from qgis.core import QgsProperty, QgsSymbolLayer  # Add imports here
+
+        logger.info("Detected Proportional Renderer. Creating data-defined size override.")
+
+        # 1. Create the base symbol (ArcGIS uses the 'minSymbol' as the template)
+        base_symbol_def = renderer_def.get("minSymbol", {})
+        base_symbol = self.symbol_factory.create_symbol(base_symbol_def)
+        if not base_symbol:
+            logger.warning("Could not create base symbol for proportional renderer. Using default.")
+            base_symbol = self._create_default_symbol(layer)
+
+        # 2. Extract sizing parameters from the JSON
+        try:
+            field = renderer_def.get("field")
+            min_data = renderer_def.get("minDataValue")
+            max_data = renderer_def.get("maxDataValue")
+            
+            # The min/max sizes are nested inside the 'visualVariables'
+            visual_var = renderer_def["visualVariables"][0]
+            min_size = visual_var.get("minSize")
+            max_size = visual_var.get("maxSize")
+            
+            if None in [field, min_data, max_data, min_size, max_size]:
+                raise KeyError("One or more required parameters for proportional sizing is missing.")
+
+        except (KeyError, IndexError) as e:
+            logger.error(f"Failed to parse proportional renderer definition: {e}")
+            return QgsSingleSymbolRenderer(base_symbol) # Fallback to a simple renderer
+
+        # 3. Build the QGIS expression for scaling
+        # The format is: scale_linear(input, domain_min, domain_max, range_min, range_max)
+        expression_string = f'scale_linear("{field}", {min_data}, {max_data}, {min_size}, {max_size})'
+        logger.info(f"Generated size expression: {expression_string}")
+
+        # 4. Apply the expression as a data-defined override for the symbol's size
+        size_property = QgsProperty.fromExpression(expression_string)
+        for i in range(base_symbol.symbolLayerCount()):
+            symbol_layer = base_symbol.symbolLayer(i)
+            symbol_layer.setDataDefinedProperty(QgsSymbolLayer.PropertySize, size_property)
+
+        # 5. Create and return the single symbol renderer
+        renderer = QgsSingleSymbolRenderer(base_symbol)
+        self._apply_common_renderer_properties(renderer, renderer_def)
+        return renderer
     
     def _create_graduated_renderer(self, renderer_def: Dict[str, Any], 
                                  layer: QgsVectorLayer) -> QgsGraduatedSymbolRenderer:
