@@ -17,16 +17,19 @@ from arc_to_q.converters.lyrx_converter import convert_lyrx
 
 if __name__ == "__main__":
     output_folder = r'D:\GBDS\Map_Layers_QGIS'
-    in_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\22_UM\Well Interval Thickness.lyrx'
-    in_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
-    in_lyrx = r'D:\GBDS\Map_Layers\Basemap\Topography and Bathmetry Contours.lyrx'  # [Feet]+ " ft (" + [Meters] + " m)"
-    in_lyrx = r'D:\GBDS\Map_Layers\contour with expr.lyrx'
-    in_lyrx = r'D:\GBDS\Map_Layers\Political labels.lyrx'
-    # plss
+    ithk_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\22_UM\Well Interval Thickness.lyrx'
+    well_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
+    topo_lyrx = r'D:\GBDS\Map_Layers\Basemap\Topography and Bathmetry Contours.lyrx'  # [Feet]+ " ft (" + [Meters] + " m)"
+    plss_lyrx = r'D:\GBDS\Map_Layers\Basemap\Public Land Survey System.lyrx'
+    cnt_lyrx = r'D:\GBDS\Map_Layers\contour with expr.lyrx'
 
 
     layers = [
-        in_lyrx,
+        cnt_lyrx,
+        well_lyrx,
+        plss_lyrx,
+        ithk_lyrx,
+        # topo_lyrx,
     ]
 
     qgs = QgsApplication([], False)
