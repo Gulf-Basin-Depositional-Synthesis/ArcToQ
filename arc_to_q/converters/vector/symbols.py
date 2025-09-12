@@ -98,45 +98,65 @@ class SymbolFactory:
     @staticmethod
     def create_marker_symbol(symbol_def: Dict[str, Any]) -> QgsMarkerSymbol:
         """
-        Create a QGIS marker symbol from an ArcGIS point/marker symbol definition.
-        
-        Args:
-            symbol_def: ArcGIS CIM marker symbol definition
-            
-        Returns:
-            QgsMarkerSymbol: The created marker symbol
+        Create a QGIS marker symbol from an ArcGIS CIM definition, correctly
+        handling symbols with and without fills by explicitly setting the stroke style.
         """
         marker_symbol = QgsMarkerSymbol()
-        marker_symbol.deleteSymbolLayer(0)  # Remove default layer
-        
-        symbol_layers = symbol_def.get("symbolLayers", [])
-        if not symbol_layers:
-            # Create a default simple marker if no layers defined
-            default_layer = SymbolFactory._create_default_marker_layer()
-            marker_symbol.appendSymbolLayer(default_layer)
+        marker_symbol.deleteSymbolLayer(0)  # Start with a blank symbol
+
+        # Find the main vector marker definition
+        arc_symbol_layers = symbol_def.get("symbolLayers", [])
+        vector_marker_def = next((ld for ld in arc_symbol_layers if ld.get("type") == "CIMVectorMarker"), None)
+
+        if not vector_marker_def:
+            marker_symbol.appendSymbolLayer(SymbolFactory._create_default_marker_layer())
             return marker_symbol
-        
-        # Process each symbol layer
-        for layer_def in symbol_layers:
-            if not layer_def.get("enable", True):
-                continue
-                
-            layer_type = layer_def.get("type")
-            
-            if layer_type == "CIMVectorMarker":
-                symbol_layer = SymbolFactory._create_vector_marker_layer(layer_def)
-                if symbol_layer:
-                    marker_symbol.appendSymbolLayer(symbol_layer)
+
+        # --- START: NEW SINGLE-LAYER LOGIC ---
+        marker_layer = QgsSimpleMarkerSymbolLayer()
+
+        # Set basic properties: size and shape
+        size = vector_marker_def.get("size", 6.0)
+        shape = SymbolFactory._determine_marker_shape(vector_marker_def)
+        marker_layer.setSize(size)
+        marker_layer.setShape(shape)
+
+        # Find the nested fill and stroke definitions from the JSON
+        graphic = vector_marker_def.get("markerGraphics", [{}])[0]
+        graphic_symbol_layers = graphic.get("symbol", {}).get("symbolLayers", [])
+        fill_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidFill"), None)
+        stroke_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidStroke"), None)
+
+        # 1. Configure the FILL (Interior)
+        if fill_def:
+            fill_color = parse_color(fill_def.get("color"))
+            if fill_color and fill_color.alpha() > 0:
+                marker_layer.setColor(fill_color)
             else:
-                logger.warning(f"Unsupported marker layer type: {layer_type}")
+                marker_layer.setColor(QColor(0, 0, 0, 0)) # Set transparent
+        else:
+            marker_layer.setColor(QColor(0, 0, 0, 0)) # Set transparent
+
+        # 2. Configure the STROKE (Outline)
+        if stroke_def:
+            stroke_color = parse_color(stroke_def.get("color"))
+            stroke_width = stroke_def.get("width", 0.26)
+            if stroke_color and stroke_width > 0:
+                # THIS IS THE CRUCIAL FIX:
+                # We must explicitly set the style to solid for the color and width to apply.
+                marker_layer.setStrokeStyle(Qt.SolidLine)
+                marker_layer.setStrokeColor(stroke_color)
+                marker_layer.setStrokeWidth(stroke_width)
+            else:
+                marker_layer.setStrokeStyle(Qt.NoPen)
+        else:
+            marker_layer.setStrokeStyle(Qt.NoPen)
         
-        # If no valid layers were created, add a default one
-        if marker_symbol.symbolLayerCount() == 0:
-            default_layer = SymbolFactory._create_default_marker_layer()
-            marker_symbol.appendSymbolLayer(default_layer)
-            
+        marker_symbol.appendSymbolLayer(marker_layer)
+        # --- END: NEW LOGIC ---
+
         return marker_symbol
-    
+            
     @staticmethod
     def create_line_symbol(symbol_def: Dict[str, Any]) -> QgsLineSymbol:
         """
@@ -235,47 +255,6 @@ class SymbolFactory:
         return fill_symbol
     
     @staticmethod
-    def _create_vector_marker_layer(layer_def: Dict[str, Any]) -> Optional[QgsSimpleMarkerSymbolLayer]:
-        """Create a QGIS marker symbol layer from a CIMVectorMarker definition."""
-        try:
-            marker_layer = QgsSimpleMarkerSymbolLayer()
-            
-            # Set size
-            size = layer_def.get("size", 6.0)
-            marker_layer.setSize(size)
-            
-            # Determine shape from markerGraphics
-            shape = SymbolFactory._determine_marker_shape(layer_def)
-            marker_layer.setShape(shape)
-            
-            # Extract colors from marker graphics
-            fill_color, stroke_color, stroke_width = SymbolFactory._extract_marker_colors(layer_def)
-            
-            # Handle line-based vs polygon-based shapes differently
-            is_line_shape = shape in [
-                QgsSimpleMarkerSymbolLayer.Cross,
-                QgsSimpleMarkerSymbolLayer.Cross2,
-                QgsSimpleMarkerSymbolLayer.Line
-            ]
-            
-            if is_line_shape:
-                # For line shapes, use fill color as stroke and make fill transparent
-                marker_layer.setColor(QColor(0, 0, 0, 0))  # Transparent fill
-                marker_layer.setStrokeColor(fill_color or QColor(0, 0, 0))
-            else:
-                # For polygon shapes, use both fill and stroke
-                marker_layer.setColor(fill_color or QColor(128, 128, 128, 100))
-                marker_layer.setStrokeColor(stroke_color or QColor(0, 0, 0, 100))
-            
-            marker_layer.setStrokeWidth(stroke_width)
-            
-            return marker_layer
-            
-        except Exception as e:
-            logger.error(f"Failed to create vector marker layer: {e}")
-            return None
-    
-    @staticmethod
     def _create_solid_stroke_layer(layer_def: Dict[str, Any]) -> Optional[QgsSimpleLineSymbolLayer]:
         """Create a QGIS line symbol layer from a CIMSolidStroke definition."""
         try:
@@ -351,32 +330,6 @@ class SymbolFactory:
         # Default to circle for unknown shapes
         logger.warning(f"Unknown marker shape, defaulting to circle")
         return QgsSimpleMarkerSymbolLayer.Circle
-    
-    @staticmethod
-    def _extract_marker_colors(layer_def: Dict[str, Any]) -> tuple:
-        """Extract fill and stroke colors from marker graphics."""
-        fill_color = QColor(128, 128, 128, 100)  # Default gray
-        stroke_color = QColor(0, 0, 0, 100)      # Default black
-        stroke_width = 0.0
-        
-        marker_graphics = layer_def.get("markerGraphics", [])
-        if not marker_graphics:
-            return fill_color, stroke_color, stroke_width
-        
-        graphic = marker_graphics[0]
-        symbol = graphic.get("symbol", {})
-        symbol_layers = symbol.get("symbolLayers", [])
-        
-        for sublayer in symbol_layers:
-            layer_type = sublayer.get("type")
-            
-            if layer_type == "CIMSolidFill":
-                fill_color = parse_color(sublayer.get("color"))
-            elif layer_type == "CIMSolidStroke":
-                stroke_color = parse_color(sublayer.get("color"))
-                stroke_width = sublayer.get("width", 0.0)
-        
-        return fill_color, stroke_color, stroke_width
     
     @staticmethod
     def _create_default_marker_layer() -> QgsSimpleMarkerSymbolLayer:

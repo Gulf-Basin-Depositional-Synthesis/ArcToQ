@@ -117,7 +117,6 @@ def _set_metadata(layer: QgsVectorLayer, layer_def: dict):
     if attribution or description or title:
         layer.setMetadata(md)
 
-
 def _set_display_field(layer: QgsVectorLayer, layer_def: dict):
     """
     Sets the display field (or "Display Name") for a QGIS layer.
@@ -136,6 +135,44 @@ def _set_display_field(layer: QgsVectorLayer, layer_def: dict):
     if display_field and layer:
         layer.setDisplayExpression(f'"{display_field}"')
 
+def _set_definition_query(layer: QgsVectorLayer, layer_def: dict):
+    """
+    Sets the definition query (subset string) for a QGIS layer and adds debugging output.
+
+    Args:
+        layer (QgsVectorLayer): The in-memory QGIS layer object to modify.
+        layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
+    """
+    print("--- Checking for definition query ---")
+    
+    feature_table = layer_def.get("featureTable", {})
+    definition_query = feature_table.get("definitionExpression")
+
+    if not definition_query:
+        print("Result: No 'definitionExpression' found in the .lyrx file.")
+        print("------------------------------------")
+        return
+
+    print(f"Found ArcGIS query: {definition_query}")
+
+    # Simple syntax translation: [FieldName] -> "FieldName"
+    # This is a common point of failure if the query is complex.
+    qgis_query = definition_query.strip().replace("[", "\"").replace("]", "\"")
+    print(f"Attempting to apply translated QGIS query: {qgis_query}")
+
+    # Apply the filter
+    layer.setSubsetString(qgis_query)
+
+    # Verify if the filter was actually applied to the layer object
+    applied_query = layer.subsetString()
+    if applied_query:
+        print(f"Success: The query '{applied_query}' is now set on the QGIS layer object.")
+    else:
+        print("Error: Failed to apply query. The layer's subset string is still empty.")
+        print("This often happens if the layer is invalid or the query syntax is incorrect for the data provider.")
+    
+    print("------------------------------------")
+
 
 def _convert_feature_layer(in_folder, layer_def, out_file):
     layer_name = layer_def['name']
@@ -148,23 +185,31 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     abs_uri, rel_uri = _parse_source(in_folder, f_table["dataConnection"], out_file)
     layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
 
+    if not layer.isValid():
+        raise RuntimeError(f"Layer failed to load with absolute path: {layer_name} | Source: {abs_uri}")
+        
     _set_display_field(layer, layer_def)
 
     renderer_factory = RendererFactory()
-    # Create the renderer using the factory
     renderer_def = layer_def.get("renderer", {})
     qgis_renderer = renderer_factory.create_renderer(renderer_def, layer)
-
-    # Apply the created renderer to the layer
     layer.setRenderer(qgis_renderer)
     
-    # set_vector_renderer(layer, layer_def["renderer"])
     set_labels(layer, layer_def)
 
-    if not layer.isValid():
-        raise RuntimeError(f"Layer failed to load: {layer_name}")
-    # Swap to relative URI
+    # --- THE FIX ---
+    # 1. Switch the data source to the relative path. This resets the filter.
     layer.setDataSource(rel_uri, layer.name(), layer.providerType())
+
+    # 2. NOW, apply the definition query. It will be the last thing set before saving.
+    _set_definition_query(layer, layer_def)
+    # ---------------
+
+    if not layer.isValid():
+        # This final check ensures the layer is still valid with the new path and query
+        print(f"CRITICAL ERROR: Layer '{layer_name}' became invalid after setting relative path or query.")
+        print(f"Check the query syntax and relative path logic: {layer.error().summary()}")
+        raise RuntimeError(f"Layer became invalid: {layer_name}")
 
     return layer
 
