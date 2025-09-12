@@ -21,7 +21,12 @@ from qgis.core import (
     QgsLineSymbol,
     QgsFillSymbol,
     QgsRuleBasedRenderer,
-    QgsExpression
+    QgsExpression,
+    QgsProperty,          
+    QgsSymbolLayer,       
+    QgsUnitTypes,         
+    QgsHeatmapRenderer,  
+    QgsGradientColorRamp,
 )
 from qgis.PyQt.QtGui import QColor
 
@@ -81,6 +86,8 @@ class RendererFactory:
                 return self._create_graduated_renderer(renderer_def, layer)
             elif renderer_type == "CIMProportionalRenderer":
                 return self._create_proportional_renderer(renderer_def, layer)
+            elif renderer_type == "CIMHeatMapRenderer":
+                return self._create_heatmap_renderer(renderer_def, layer)
             elif renderer_type == "CIMRuleBasedRenderer":
                 return self._create_rule_based_renderer(renderer_def, layer)
             else:
@@ -368,6 +375,56 @@ class RendererFactory:
         # 5. Create and return the single symbol renderer
         renderer = QgsSingleSymbolRenderer(base_symbol)
         self._apply_common_renderer_properties(renderer, renderer_def)
+        return renderer
+    
+    def _create_heatmap_renderer(self, renderer_def: Dict[str, Any],
+                                 layer: QgsVectorLayer) -> QgsHeatmapRenderer:
+        """
+        Creates a QGIS Heatmap renderer from an ArcGIS CIMHeatMapRenderer definition.
+        
+        NOTE: Creates a simplified two-color gradient due to API limitations
+        in older QGIS versions.
+        """
+        logger.info("Detected Heat Map Renderer.")
+
+        renderer = QgsHeatmapRenderer()
+
+        # 1. Set the radius
+        radius_points = renderer_def.get("radius", 10.0)
+        renderer.setRadius(radius_points)
+        renderer.setRadiusUnit(QgsUnitTypes.RenderPoints)
+
+        # 2. Set the weight field (if one is used)
+        weight_field = renderer_def.get("weightField")
+        if weight_field:
+            renderer.setWeightExpression(f'"{weight_field}"')
+            logger.info(f"Set heatmap weight field to: {weight_field}")
+
+        # 3. Parse the color ramp (Simplified for older QGIS versions)
+        arc_color_scheme = renderer_def.get("colorScheme")
+        if arc_color_scheme and arc_color_scheme.get("colorRamps"):
+            color_ramp_segments = arc_color_scheme["colorRamps"]
+            
+            if color_ramp_segments:
+                # Get the very first "from" color of the entire ramp
+                start_color_def = color_ramp_segments[0].get("fromColor")
+                start_color = parse_color(start_color_def)
+                
+                # Get the very last "to" color of the entire ramp
+                end_color_def = color_ramp_segments[-1].get("toColor")
+                end_color = parse_color(end_color_def)
+
+                if start_color and end_color:
+                    # Create a simple two-color gradient ramp
+                    gradient_ramp = QgsGradientColorRamp(start_color, end_color)
+                    renderer.setColorRamp(gradient_ramp)
+                    logger.info("Created a simplified two-color gradient ramp (multi-stop not supported in this QGIS version).")
+
+        # 4. Set render quality to maximum
+        quality = renderer_def.get("rendererQuality", 4)
+        renderer.setRenderQuality(quality)
+        logger.info(f"Set heatmap render quality to {quality}.")
+        
         return renderer
     
     def _create_graduated_renderer(self, renderer_def: Dict[str, Any], 
