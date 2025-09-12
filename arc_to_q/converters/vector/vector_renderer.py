@@ -28,8 +28,14 @@ from qgis.core import (
     QgsUnitTypes,         
     QgsHeatmapRenderer,  
     QgsGradientColorRamp,
+    QgsClassificationRange,
+    QgsSimpleMarkerSymbolLayer,
+    QgsSimpleFillSymbolLayer,
+    QgsSimpleLineSymbolLayer
+
 )
 from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import Qt
 from arc_to_q.converters.vector.symbols import SymbolFactory
 from arc_to_q.converters.utils import parse_color
 
@@ -446,87 +452,222 @@ class RendererFactory:
         
         return renderer
     
-    def _create_graduated_renderer(self, renderer_def: Dict[str, Any], 
-                                 layer: QgsVectorLayer) -> QgsGraduatedSymbolRenderer:
+    def _create_graduated_renderer(self, renderer_def: Dict[str, Any],
+                                layer: QgsVectorLayer) -> QgsGraduatedSymbolRenderer:
         """
         Create a QGIS graduated renderer from a CIMClassBreaksRenderer definition.
-        
-        Args:
-            renderer_def: ArcGIS CIMClassBreaksRenderer definition
-            layer: The target QGIS vector layer
-            
-        Returns:
-            QgsGraduatedSymbolRenderer: The created renderer
+        This now handles both standard class breaks and those using a discrete color ramp.
         """
-        # Get the field name for classification
+        # --- Check for Unclassed (Continuous) renderer first ---
+        if renderer_def.get("classBreakType") == "UnclassedColor":
+            return self._create_unclassed_color_renderer(renderer_def, layer)
+
+        # --- Proceed with standard discrete class breaks ---
         field_name = renderer_def.get("field")
         if not field_name:
             raise RendererCreationError("No field name found for class breaks renderer")
-        
-        # Validate field exists in layer
         if not self._validate_field_exists(layer, field_name):
             raise RendererCreationError(f"Field '{field_name}' not found in layer '{layer.name()}'")
-        
-        # Get class breaks
+
         breaks = renderer_def.get("breaks", [])
         if not breaks:
             logger.warning("No breaks found in class breaks renderer definition")
             return self._create_default_graduated_renderer(layer, field_name)
+
+        # --- Enhanced color ramp parsing for multi-color ramps ---
+        discrete_colors = []
+        color_ramp_def = renderer_def.get("colorRamp")
         
-        # Sort breaks by upper bound to ensure proper ordering
-        breaks = sorted(breaks, key=lambda b: b.get("upperBound", float("inf")))
-        
+        if color_ramp_def and color_ramp_def.get("type") == "CIMMultipartColorRamp":
+            logger.info("Parsing CIMMultipartColorRamp")
+            color_ramp_segments = color_ramp_def.get("colorRamps", [])
+            
+            # For multi-color ramps with multiple segments, extract all unique colors
+            all_colors = []
+            for i, ramp_part in enumerate(color_ramp_segments):
+                # Use the enhanced parse_color from utils
+                from_color = parse_color(ramp_part.get("fromColor"))
+                to_color = parse_color(ramp_part.get("toColor"))
+                
+                # Add fromColor (but avoid duplicates)
+                if from_color and not self._color_already_exists(from_color, all_colors):
+                    all_colors.append(from_color)
+                
+                # Add toColor (but avoid duplicates)  
+                if to_color and not self._color_already_exists(to_color, all_colors):
+                    all_colors.append(to_color)
+            
+            logger.info(f"Extracted {len(all_colors)} unique colors from ramp")
+            
+            # Now interpolate between these colors to create enough colors for all breaks
+            if len(all_colors) >= 2:
+                discrete_colors = self._create_interpolated_colors(all_colors, len(breaks))
+                logger.info(f"Created {len(discrete_colors)} interpolated colors for {len(breaks)} breaks")
+
+        # --- Alternative: Simple continuous color ramp ---
+        elif color_ramp_def and color_ramp_def.get("type") == "CIMLinearContinuousColorRamp":
+            logger.info("Parsing CIMLinearContinuousColorRamp")
+            from_color = parse_color(color_ramp_def.get("fromColor"))
+            to_color = parse_color(color_ramp_def.get("toColor"))
+            if from_color and to_color:
+                discrete_colors = self._interpolate_colors(from_color, to_color, len(breaks))
+                logger.info(f"Interpolated {len(discrete_colors)} colors")
+
+        # Fallback: extract from symbols if color ramp parsing failed
+        if not discrete_colors:
+            logger.info("Fallback: extracting colors from break symbols")
+            for i, break_def in enumerate(breaks):
+                symbol_def = break_def.get("symbol", {})
+                symbol_color = self._extract_color_from_symbol_def(symbol_def)
+                if symbol_color:
+                    discrete_colors.append(symbol_color)
+
+        logger.info(f"Final: Using {len(discrete_colors)} colors for {len(breaks)} breaks")
+
         # Create ranges from breaks
         ranges = []
-        min_value = renderer_def.get("minValue")
-        if min_value is None:
-            # Use the first break's lower bound or negative infinity
-            min_value = breaks[0].get("lowerBound", float("-inf"))
-        
-        lower_bound = min_value
-        
-        for break_def in breaks:
-            range_obj = self._create_renderer_range(break_def, lower_bound, layer)
+        lower_bound = renderer_def.get("minimumBreak", 0.0)
+
+        for i, break_def in enumerate(breaks):
+            override_color = discrete_colors[i] if i < len(discrete_colors) else None
+            range_obj = self._create_renderer_range(break_def, lower_bound, layer, override_color)
             if range_obj:
                 ranges.append(range_obj)
-                lower_bound = break_def.get("upperBound", lower_bound)
-        
+            lower_bound = break_def.get("upperBound", lower_bound)
+
         if not ranges:
-            logger.warning("No valid ranges created, using default")
             return self._create_default_graduated_renderer(layer, field_name)
-        
-        # Create the renderer
+
         renderer = QgsGraduatedSymbolRenderer(field_name, ranges)
-        
-        # Set classification method if specified
-        classification_method = renderer_def.get("classificationMethod", "")
-        if classification_method:
-            # Map ArcGIS classification methods to QGIS if needed
-            # This is a future enhancement opportunity
-            pass
-        
-        # Apply common renderer properties
         self._apply_common_renderer_properties(renderer, renderer_def)
-        
-        logger.info(f"Created graduated renderer for layer '{layer.name()}' with {len(ranges)} ranges")
         return renderer
-    
-    def _create_rule_based_renderer(self, renderer_def: Dict[str, Any], 
-                                  layer: QgsVectorLayer) -> QgsRuleBasedRenderer:
+
+    def _color_already_exists(self, color: QColor, color_list: List[QColor]) -> bool:
+        """Check if a color already exists in the list (comparing RGB values)."""
+        for existing_color in color_list:
+            if (color.red() == existing_color.red() and 
+                color.green() == existing_color.green() and 
+                color.blue() == existing_color.blue()):
+                return True
+        return False
+
+    def _create_interpolated_colors(self, base_colors: List[QColor], num_needed: int) -> List[QColor]:
         """
-        Create a QGIS rule-based renderer from a CIMRuleBasedRenderer definition.
+        Create interpolated colors from a list of base colors.
+        """
+        if num_needed <= len(base_colors):
+            return base_colors[:num_needed]
         
-        This is a future enhancement - currently returns a default renderer.
+        if len(base_colors) < 2:
+            # Can't interpolate with less than 2 colors
+            return base_colors * num_needed  # Repeat the colors
         
-        Args:
-            renderer_def: ArcGIS CIMRuleBasedRenderer definition
-            layer: The target QGIS vector layer
+        result_colors = []
+        segments = len(base_colors) - 1  # Number of segments between colors
+        colors_per_segment = (num_needed - 1) / segments
+        
+        for segment in range(segments):
+            start_color = base_colors[segment]
+            end_color = base_colors[segment + 1]
             
-        Returns:
-            QgsRuleBasedRenderer: The created renderer
+            # Calculate how many colors this segment should contribute
+            if segment < segments - 1:
+                segment_colors = int(colors_per_segment)
+            else:
+                # Last segment gets any remaining colors
+                segment_colors = num_needed - len(result_colors) - 1
+            
+            # Create interpolated colors for this segment
+            for i in range(segment_colors):
+                ratio = i / max(1, segment_colors)
+                interpolated = self._interpolate_single_color(start_color, end_color, ratio)
+                result_colors.append(interpolated)
+        
+        # Always add the final color
+        result_colors.append(base_colors[-1])
+        
+        # Ensure we have exactly the right number of colors
+        while len(result_colors) < num_needed:
+            result_colors.append(base_colors[-1])
+        
+        return result_colors[:num_needed]
+
+    def _interpolate_single_color(self, color1: QColor, color2: QColor, ratio: float) -> QColor:
+        """Interpolate between two colors."""
+        r = int(color1.red() + (color2.red() - color1.red()) * ratio)
+        g = int(color1.green() + (color2.green() - color1.green()) * ratio)
+        b = int(color1.blue() + (color2.blue() - color1.blue()) * ratio)
+        a = int(color1.alpha() + (color2.alpha() - color1.alpha()) * ratio)
+        return QColor(r, g, b, a)
+
+    # Add this helper method to extract colors from symbol definitions
+    def _extract_color_from_symbol_def(self, symbol_def: Dict[str, Any]) -> Optional[QColor]:
         """
-        logger.warning("Rule-based renderers not yet implemented, using default single symbol")
-        return self._create_default_renderer(layer)
+        Extract color from a symbol definition for use in discrete color ramps.
+        """
+        try:
+            # Look for color in symbol layers
+            symbol_layers = symbol_def.get("symbolLayers", [])
+            for layer in symbol_layers:
+                if "color" in layer:
+                    return self._parse_color_safe(layer["color"])
+                # Also check for fill color in case it's nested differently
+                if "fillColor" in layer:
+                    return self._parse_color_safe(layer["fillColor"])
+            return None
+        except Exception as e:
+            logger.debug(f"Could not extract color from symbol definition: {e}")
+            return None
+        
+    def _create_unclassed_color_renderer(self, renderer_def: Dict[str, Any],
+                                        layer: QgsVectorLayer) -> QgsGraduatedSymbolRenderer:
+        """
+        Creates a QGIS Graduated renderer to replicate ArcGIS's "Unclassed Colors"
+        by creating a single range and instructing the renderer to apply a color ramp.
+        """
+        try:
+            field = renderer_def.get("field")
+            if not field:
+                raise RendererCreationError("Field not specified for UnclassedColor renderer.")
+
+            color_var = next((var for var in renderer_def.get("visualVariables", [])
+                            if var.get("type") == "CIMColorVisualVariable"), None)
+            if not color_var:
+                raise RendererCreationError("CIMColorVisualVariable not found for UnclassedColor renderer.")
+
+            min_value = color_var.get("minValue")
+            max_value = color_var.get("maxValue")
+
+            arc_color_ramps = color_var.get("colorRamp", {}).get("colorRamps", [])
+            if not arc_color_ramps:
+                raise RendererCreationError("Color ramp definition is missing.")
+
+            # Use the enhanced parse_color from utils
+            start_color = parse_color(arc_color_ramps[0].get("fromColor"))
+            end_color = parse_color(arc_color_ramps[-1].get("toColor"))
+            
+            if not start_color or not end_color:
+                raise RendererCreationError("Could not parse start or end color of the ramp.")
+
+            qgis_color_ramp = QgsGradientColorRamp(start_color, end_color)
+
+            # Create the base symbol
+            base_symbol_def = renderer_def["breaks"][0]["symbol"]
+            base_symbol = self.symbol_factory.create_symbol(base_symbol_def) or self._create_default_symbol(layer)
+
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"Failed to parse UnclassedColor renderer definition: {e}")
+            return self._create_default_graduated_renderer(layer, renderer_def.get("field", ""))
+
+        # Create renderer with single range and apply color ramp
+        label = f"{min_value:.2f} - {max_value:.2f}"
+        single_range = [QgsRendererRange(min_value, max_value, base_symbol, label)]
+        renderer = QgsGraduatedSymbolRenderer(field, single_range)
+        renderer.setSourceColorRamp(qgis_color_ramp)
+        renderer.setGraduatedMethod(QgsGraduatedSymbolRenderer.GraduatedColor)
+        renderer.updateColorRamp(qgis_color_ramp)
+
+        return renderer
     
     def _create_renderer_category(self, uv_def: Dict[str, Any], 
                                 layer: QgsVectorLayer) -> Optional[QgsRendererCategory]:
@@ -552,24 +693,65 @@ class RendererFactory:
             return None
     
     def _create_renderer_range(self, break_def: Dict[str, Any], lower_bound: float,
-                             layer: QgsVectorLayer) -> Optional[QgsRendererRange]:
-        """Create a QgsRendererRange from a class break definition."""
+                            layer: QgsVectorLayer, override_color: QColor = None) -> Optional[QgsRendererRange]:
+        """
+        Create a QgsRendererRange from a class break definition.
+        Includes improved color override logic with better debugging.
+        """
         try:
             upper_bound = break_def.get("upperBound")
             if upper_bound is None:
-                logger.warning("No upper bound found in class break definition")
                 return None
-            
+
             label = break_def.get("label", f"{lower_bound} - {upper_bound}")
             symbol_def = break_def.get("symbol", {})
-            
             symbol = self.symbol_factory.create_symbol(symbol_def)
             if not symbol:
-                logger.warning(f"Failed to create symbol for range '{label}'")
                 symbol = self._create_default_symbol(layer)
-            
+
+            # --- Apply the override color with improved logic ---
+            if override_color:
+                logger.info(f"Applying override color {override_color.name()} to range {label}")
+                
+                # Clone the symbol to avoid modifying the original
+                symbol = symbol.clone()
+                
+                # Apply color to all symbol layers
+                for i in range(symbol.symbolLayerCount()):
+                    symbol_layer = symbol.symbolLayer(i)
+                    layer_type = type(symbol_layer).__name__
+                    logger.debug(f"Processing symbol layer {i} of type: {layer_type}")
+                    
+                    # Handle different symbol layer types
+                    if hasattr(symbol_layer, 'setColor'):
+                        original_color = symbol_layer.color()
+                        symbol_layer.setColor(override_color)
+                        logger.debug(f"Set color from {original_color.name()} to {override_color.name()}")
+                    
+                    # Ensure outline/stroke is visible for filled symbols
+                    if hasattr(symbol_layer, 'setStrokeColor') and hasattr(symbol_layer, 'strokeColor'):
+                        current_stroke = symbol_layer.strokeColor()
+                        # If stroke is transparent or the same as the old fill, make it visible
+                        if current_stroke.alpha() == 0 or current_stroke == original_color:
+                            # Set a contrasting outline color
+                            if override_color.lightness() > 128:
+                                outline_color = QColor(0, 0, 0, 255)  # Black outline for light fill
+                            else:
+                                outline_color = QColor(255, 255, 255, 255)  # White outline for dark fill
+                            
+                            symbol_layer.setStrokeColor(outline_color)
+                            logger.debug(f"Set stroke color to {outline_color.name()}")
+                            
+                            # Make sure stroke style is solid
+                            if hasattr(symbol_layer, 'setStrokeStyle'):
+                                symbol_layer.setStrokeStyle(Qt.SolidLine)
+                                logger.debug("Set stroke style to solid line")
+
+            else:
+                logger.debug(f"No override color provided for range {label}")
+
             return QgsRendererRange(lower_bound, upper_bound, symbol, label)
-            
+
         except Exception as e:
             logger.error(f"Failed to create renderer range: {e}")
             return None
@@ -647,86 +829,3 @@ class RendererFactory:
                 renderer.setSizeScaleField(size_field)
 
 
-class RendererUtils:
-    """Utility functions for working with renderers."""
-    
-    @staticmethod
-    def get_renderer_summary(renderer: QgsFeatureRenderer) -> str:
-        """Get a human-readable summary of a renderer."""
-        if isinstance(renderer, QgsSingleSymbolRenderer):
-            return "Single Symbol Renderer"
-        elif isinstance(renderer, QgsCategorizedSymbolRenderer):
-            return f"Categorized Renderer ({len(renderer.categories())} categories on '{renderer.classAttribute()}')"
-        elif isinstance(renderer, QgsGraduatedSymbolRenderer):
-            return f"Graduated Renderer ({len(renderer.ranges())} ranges on '{renderer.classAttribute()}')"
-        elif isinstance(renderer, QgsRuleBasedRenderer):
-            return f"Rule-based Renderer ({len(renderer.rootRule().children())} rules)"
-        else:
-            return f"Unknown Renderer Type: {type(renderer).__name__}"
-    
-    @staticmethod
-    def validate_renderer_field(layer: QgsVectorLayer, field_name: str) -> bool:
-        """Validate that a field exists and is suitable for rendering."""
-        if not field_name:
-            return False
-        
-        field = layer.fields().field(field_name)
-        if not field.isValid():
-            return False
-        
-        # Check if field has any values (basic validation)
-        if layer.featureCount() == 0:
-            return True  # Empty layer is valid
-        
-        # Could add more sophisticated validation here
-        return True
-    
-    @staticmethod
-    def copy_renderer_properties(source: QgsFeatureRenderer, target: QgsFeatureRenderer):
-        """Copy common properties from one renderer to another."""
-        if hasattr(source, 'rotationField') and hasattr(target, 'setRotationField'):
-            target.setRotationField(source.rotationField())
-        
-        if hasattr(source, 'sizeScaleField') and hasattr(target, 'setSizeScaleField'):
-            target.setSizeScaleField(source.sizeScaleField())
-
-
-# Convenience functions for common renderer creation patterns
-def create_simple_renderer(symbol, layer: QgsVectorLayer) -> QgsSingleSymbolRenderer:
-    """Create a simple single symbol renderer."""
-    return QgsSingleSymbolRenderer(symbol)
-
-
-def create_categorized_renderer_from_values(layer: QgsVectorLayer, field_name: str, 
-                                          values_symbols: Dict[Any, Any]) -> QgsCategorizedSymbolRenderer:
-    """
-    Create a categorized renderer from a dictionary of values and symbols.
-    
-    Args:
-        layer: The target layer
-        field_name: The field to categorize on  
-        values_symbols: Dictionary mapping values to symbols {value: symbol}
-    """
-    categories = []
-    for value, symbol in values_symbols.items():
-        label = str(value)
-        categories.append(QgsRendererCategory(value, symbol, label))
-    
-    return QgsCategorizedSymbolRenderer(field_name, categories)
-
-
-def create_graduated_renderer_from_breaks(layer: QgsVectorLayer, field_name: str,
-                                        breaks_symbols: List[tuple]) -> QgsGraduatedSymbolRenderer:
-    """
-    Create a graduated renderer from a list of breaks and symbols.
-    
-    Args:
-        layer: The target layer
-        field_name: The field to classify on
-        breaks_symbols: List of tuples (lower, upper, symbol, label)
-    """
-    ranges = []
-    for lower, upper, symbol, label in breaks_symbols:
-        ranges.append(QgsRendererRange(lower, upper, symbol, label))
-    
-    return QgsGraduatedSymbolRenderer(field_name, ranges)

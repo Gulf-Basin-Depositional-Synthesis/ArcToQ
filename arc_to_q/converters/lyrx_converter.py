@@ -143,7 +143,6 @@ def _set_definition_query(layer: QgsVectorLayer, layer_def: dict):
         layer (QgsVectorLayer): The in-memory QGIS layer object to modify.
         layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
     """
-    print("--- Checking for definition query ---")
     
     feature_table = layer_def.get("featureTable", {})
     definition_query = feature_table.get("definitionExpression")
@@ -153,12 +152,12 @@ def _set_definition_query(layer: QgsVectorLayer, layer_def: dict):
         print("------------------------------------")
         return
 
-    print(f"Found ArcGIS query: {definition_query}")
+    #print(f"Found ArcGIS query: {definition_query}")
 
     # Simple syntax translation: [FieldName] -> "FieldName"
     # This is a common point of failure if the query is complex.
     qgis_query = definition_query.strip().replace("[", "\"").replace("]", "\"")
-    print(f"Attempting to apply translated QGIS query: {qgis_query}")
+    #print(f"Attempting to apply translated QGIS query: {qgis_query}")
 
     # Apply the filter
     layer.setSubsetString(qgis_query)
@@ -166,12 +165,11 @@ def _set_definition_query(layer: QgsVectorLayer, layer_def: dict):
     # Verify if the filter was actually applied to the layer object
     applied_query = layer.subsetString()
     if applied_query:
-        print(f"Success: The query '{applied_query}' is now set on the QGIS layer object.")
+        return None
     else:
         print("Error: Failed to apply query. The layer's subset string is still empty.")
         print("This often happens if the layer is invalid or the query syntax is incorrect for the data provider.")
     
-    print("------------------------------------")
 
 
 def _convert_feature_layer(in_folder, layer_def, out_file):
