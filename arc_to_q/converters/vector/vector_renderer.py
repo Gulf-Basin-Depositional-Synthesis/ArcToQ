@@ -21,6 +21,7 @@ from qgis.core import (
     QgsLineSymbol,
     QgsFillSymbol,
     QgsRuleBasedRenderer,
+    QgsSymbol,
     QgsExpression,
     QgsProperty,          
     QgsSymbolLayer,       
@@ -29,7 +30,6 @@ from qgis.core import (
     QgsGradientColorRamp,
 )
 from qgis.PyQt.QtGui import QColor
-
 from arc_to_q.converters.vector.symbols import SymbolFactory
 from arc_to_q.converters.utils import parse_color
 
@@ -81,15 +81,13 @@ class RendererFactory:
             if renderer_type == "CIMSimpleRenderer":
                 return self._create_single_symbol_renderer(renderer_def, layer)
             elif renderer_type == "CIMUniqueValueRenderer":
-                return self._create_categorized_renderer(renderer_def, layer)
+                return self._create_categorized_or_rule_based_renderer(renderer_def, layer)
             elif renderer_type == "CIMClassBreaksRenderer":
                 return self._create_graduated_renderer(renderer_def, layer)
             elif renderer_type == "CIMProportionalRenderer":
                 return self._create_proportional_renderer(renderer_def, layer)
             elif renderer_type == "CIMHeatMapRenderer":
                 return self._create_heatmap_renderer(renderer_def, layer)
-            elif renderer_type == "CIMRuleBasedRenderer":
-                return self._create_rule_based_renderer(renderer_def, layer)
             else:
                 raise UnsupportedRendererError(f"Unsupported renderer type: {renderer_type}")
                 
@@ -129,45 +127,24 @@ class RendererFactory:
         logger.info(f"Created single symbol renderer for layer '{layer.name()}'")
         return renderer
     
-    def _translate_arcade_if_else_to_case(self, arcade_expr: str) -> str:
+    def _create_categorized_or_rule_based_renderer(self, renderer_def: Dict[str, Any],
+                                                   layer: QgsVectorLayer) -> QgsFeatureRenderer:
         """
-        Translates a specific pattern of Arcade if/else if/else expression
-        into a QGIS CASE WHEN expression using regular expressions.
+        Decides whether to create a Bivariate, Expression-based, or standard Categorized renderer.
         """
-        # Step 1: Extract the variable and field name (e.g., "var val = $feature.OBJECTID;")
-        field_match = re.search(r"var\s+(?P<var>\w+)\s*=\s*\$feature\.(?P<field>\w+);", arcade_expr)
-        if not field_match:
-            logger.error("Could not find field name in Arcade expression.")
-            return ""
-        
-        var_name = field_match.group('var')
-        field_name = f'"{field_match.group('field')}"'
-        
-        # Step 2: Find all 'if' and 'else if' blocks and their return values
-        pattern = re.compile(
-            r"if\s*\((?P<condition>.*?)\)\s*\{\s*return\s*\"(?P<retval>.*?)\";\s*\}",
-            re.DOTALL
-        )
-        matches = pattern.finditer(arcade_expr)
+        authoring_info = renderer_def.get("authoringInfo", {})
+        if authoring_info.get("type") == "CIMBivariateRendererAuthoringInfo":
+            logger.info("Bivariate authoring info found, creating QGIS Bivariate-style Renderer.")
+            return self._create_bivariate_renderer(renderer_def, layer)
 
-        # Step 3: Find the final 'else' block's return value
-        else_match = re.search(r"else\s*\{\s*return\s*\"(.*?)\";\s*\}", arcade_expr, re.DOTALL)
-        if not else_match:
-            logger.error("Could not find final 'else' block in Arcade expression.")
-            return ""
+        if "valueExpressionInfo" in renderer_def:
+            logger.info("Expression found, creating QGIS Categorized Renderer with a CASE expression.")
+            return self._create_categorized_renderer_from_expression(renderer_def, layer)
 
-        # Step 4: Build the QGIS CASE statement from the extracted parts
-        case_parts = ["CASE"]
-        for match in matches:
-            # Replace the Arcade variable with the QGIS field name and '&&' with 'AND'
-            condition = match.group('condition').replace(var_name, field_name).replace("&&", "AND")
-            retval = match.group('retval')
-            case_parts.append(f"    WHEN {condition} THEN '{retval}'")
-        
-        case_parts.append(f"    ELSE '{else_match.group(1)}'")
-        case_parts.append("END")
-        
-        return "\n".join(case_parts)
+        else:
+            logger.info("No expression or bivariate info, creating standard QGIS Categorized Renderer.")
+            return self._create_categorized_renderer(renderer_def, layer)
+    
     
     def _create_bivariate_renderer(self, renderer_def: Dict[str, Any],
                                    layer: QgsVectorLayer) -> QgsCategorizedSymbolRenderer:
@@ -241,90 +218,132 @@ class RendererFactory:
         self._apply_common_renderer_properties(renderer, renderer_def)
         return renderer
     
-    def _create_categorized_renderer(self, renderer_def: Dict[str, Any], 
-                                   layer: QgsVectorLayer) -> QgsFeatureRenderer:
+    def _create_categorized_renderer_from_expression(self, renderer_def: Dict[str, Any],
+                                                     layer: QgsVectorLayer) -> QgsCategorizedSymbolRenderer:
         """
-        Controller function for CIMUniqueValueRenderer.
+        Creates a QGIS categorized renderer by translating an Arcade expression
+        into a single QGIS CASE...WHEN...END expression.
+        """
+        arcade_expr = renderer_def["valueExpressionInfo"]["expression"]
+        qgis_case_expression = self._translate_arcade_to_case(arcade_expr)
+
+        if not qgis_case_expression:
+             raise RendererCreationError("Failed to translate Arcade expression to CASE statement.")
         
-        It detects the type of renderer (Bivariate, Expression, or Simple Field)
-        and calls the appropriate helper function to create it.
-        """
-        # --- NEW: Check for Bivariate data FIRST ---
-        authoring_info = renderer_def.get("authoringInfo", {})
-        if authoring_info.get("type") == "CIMBivariateRendererAuthoringInfo":
-            return self._create_bivariate_renderer(renderer_def, layer)
-
-        # --- HANDLE SIMPLE FIELD-BASED RENDERER ---
-        field_names = renderer_def.get("fieldNames", [])
-        if field_names:
-            if len(field_names) > 1:
-                logger.warning(f"Multiple field names found: {field_names}. Only the first will be used.")
-            
-            field_name = field_names[0]
-            if not self._validate_field_exists(layer, field_name):
-                raise RendererCreationError(f"Field '{field_name}' not found in layer '{layer.name()}'")
-
-            categories = []
-            for uv_def in renderer_def.get("uniqueValues", []):
-                category = self._create_renderer_category(uv_def, layer)
-                if category:
-                    categories.append(category)
-
-            if not categories:
-                return self._create_default_categorized_renderer(layer, field_name)
-            
-            renderer = QgsCategorizedSymbolRenderer(field_name, categories)
+        categories = []
+        for group in renderer_def.get("groups", []):
+            for u_class in group.get("classes", []):
+                try:
+                    value = u_class["values"][0]["fieldValues"][0]
+                    label = u_class.get("label", str(value))
+                    symbol_def = u_class.get("symbol")
+                    symbol = self.symbol_factory.create_symbol(symbol_def) or self._create_default_symbol(layer)
+                    categories.append(QgsRendererCategory(value, symbol.clone(), label))
+                except (KeyError, IndexError):
+                    continue
+        
+        renderer = QgsCategorizedSymbolRenderer(qgis_case_expression, categories)
+        
+        if renderer_def.get("useDefaultSymbol", False):
             default_symbol_def = renderer_def.get("defaultSymbol")
             if default_symbol_def:
                 default_symbol = self.symbol_factory.create_symbol(default_symbol_def)
                 if default_symbol:
-                    renderer.setSourceSymbol(default_symbol)
-            
-            self._apply_common_renderer_properties(renderer, renderer_def)
-            return renderer
+                    renderer.setSourceSymbol(default_symbol.clone())
 
-        # --- DYNAMICALLY HANDLE OTHER ARCADE EXPRESSIONS ---
-        expression_info = renderer_def.get("valueExpressionInfo")
-        if expression_info:
-            arcade_expr = expression_info.get("expression", "")
-            qgis_expr = self._translate_arcade_if_else_to_case(arcade_expr)
+        return renderer
 
-            if not qgis_expr:
-                raise RendererCreationError(f"Failed to translate Arcade expression: {arcade_expr}")
-            
-            logger.info("Successfully translated Arcade expression to a dynamic QGIS CASE statement.")
+    def _translate_arcade_to_case(self, arcade_expr: str) -> str:
+        """
+        Translates a full Arcade if/else if/else block into a QGIS CASE statement.
+        """
+        rules = self._parse_arcade_if_else(arcade_expr)
+        if not rules:
+            return ""
 
-            categories = []
-            for group in renderer_def.get("groups", []):
-                for uv_class in group.get("classes", []):
-                    try:
-                        value = uv_class["values"][0]["fieldValues"][0]
-                        label = uv_class.get("label")
-                        symbol_def = uv_class.get("symbol")
-                        
-                        symbol = self.symbol_factory.create_symbol(symbol_def)
-                        if not symbol:
-                            symbol = self._create_default_symbol(layer)
+        case_parts = ["CASE"]
+        
+        else_rule = None
+        if rules and rules[-1][0].lower() == 'true':
+            else_rule = rules.pop()
 
-                        categories.append(QgsRendererCategory(value, symbol, label))
-                    except (KeyError, IndexError):
-                        continue
+        for condition, return_value in rules:
+            qgis_condition = self._translate_arcade_condition_to_qgis(condition)
+            case_parts.append(f"    WHEN {qgis_condition} THEN '{return_value}'")
+    
+        if else_rule:
+            case_parts.append(f"    ELSE '{else_rule[1]}'")
+    
+        case_parts.append("END")
+        
+        full_expression = "\n".join(case_parts)
+        logger.info(f"Translated Arcade to CASE statement:\n{full_expression}")
+        return full_expression
+
+    def _parse_arcade_if_else(self, expression: str) -> List[tuple]:
+        """
+        Parses an if/else if/else Arcade expression into a list of
+        (condition, return_value) tuples. The 'else' case has a condition of 'True'.
+        """
+        rules = []
+        pattern = re.compile(
+            r"(?:if|else if)\s*\((.*?)\)\s*\{.*?return\s*['\"](.*?)['\"].*?\}",
+            re.DOTALL | re.IGNORECASE
+        )
+        for match in pattern.finditer(expression):
+            rules.append((match.group(1).strip(), match.group(2).strip()))
             
-            if not categories:
-                raise RendererCreationError("Found expression but failed to create any categories from 'groups'.")
+        else_pattern = re.compile(r"else\s*\{.*?return\s*['\"](.*?)['\"].*?\}", re.DOTALL | re.IGNORECASE)
+        if else_match := else_pattern.search(expression):
+            rules.append(('True', else_match.group(1).strip()))
             
-            renderer = QgsCategorizedSymbolRenderer(qgis_expr, categories)
-            
+        return rules
+
+    def _translate_arcade_condition_to_qgis(self, condition: str) -> str:
+        """
+        Translates a single Arcade condition string into a QGIS expression string.
+        """
+        qgis_expr = re.sub(r"\$feature\.(\w+)", r'"\1"', condition)
+        qgis_expr = qgis_expr.replace("&&", "AND").replace("||", "OR")
+        qgis_expr = qgis_expr.replace("==", "=")
+        return qgis_expr
+        
+    def _create_categorized_renderer(self, renderer_def: Dict[str, Any],
+                                     layer: QgsVectorLayer) -> QgsCategorizedSymbolRenderer:
+        """
+        Creates a QGIS categorized renderer from a CIMUniqueValueRenderer definition
+        that uses a simple field, not an expression.
+        """
+        field_names = renderer_def.get("fields", renderer_def.get("fieldNames", []))
+        if not field_names:
+            raise RendererCreationError("No 'fields' key found in the categorized renderer definition.")
+        
+        field_name = field_names[0]
+        if len(field_names) > 1:
+            logger.warning(f"Multiple fields found ({field_names}). Only the first, '{field_name}', will be used.")
+
+        categories = []
+        for group in renderer_def.get("groups", []):
+            for u_class in group.get("classes", []):
+                try:
+                    value = u_class["values"][0]["fieldValues"][0]
+                    label = u_class.get("label", str(value))
+                    symbol_def = u_class.get("symbol")
+                    symbol = self.symbol_factory.create_symbol(symbol_def) or self._create_default_symbol(layer)
+                    categories.append(QgsRendererCategory(value, symbol, label))
+                except (KeyError, IndexError):
+                    continue
+        
+        renderer = QgsCategorizedSymbolRenderer(field_name, categories)
+        
+        # Handle the default symbol for values that don't match any category
+        if renderer_def.get("useDefaultSymbol", False):
             default_symbol_def = renderer_def.get("defaultSymbol")
-            if default_symbol_def and renderer_def.get("useDefaultSymbol"):
+            if default_symbol_def:
                 default_symbol = self.symbol_factory.create_symbol(default_symbol_def)
-                if default_symbol:
-                    renderer.setSourceSymbol(default_symbol)
+                renderer.setSourceSymbol(default_symbol)
 
-            self._apply_common_renderer_properties(renderer, renderer_def)
-            return renderer
-
-        raise RendererCreationError("No 'fieldNames' or 'valueExpressionInfo' key found in the renderer definition.")
+        return renderer
     
     def _create_proportional_renderer(self, renderer_def: Dict[str, Any],
                                       layer: QgsVectorLayer) -> QgsSingleSymbolRenderer:
@@ -332,7 +351,7 @@ class RendererFactory:
         Creates a QGIS single symbol renderer with a data-defined size override
         from an ArcGIS CIMProportionalRenderer definition.
         """
-        from qgis.core import QgsProperty, QgsSymbolLayer  # Add imports here
+        
 
         logger.info("Detected Proportional Renderer. Creating data-defined size override.")
 
