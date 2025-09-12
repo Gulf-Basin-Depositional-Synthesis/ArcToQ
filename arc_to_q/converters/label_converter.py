@@ -100,7 +100,7 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
         if line_method == "OffsetCurvedFromLine":
             labeling.placement = QgsPalLayerSettings.Curved
         elif line_method == "OffsetStraightFromLine":
-            labeling.placement = QgsPalLayerSettings.Parallel
+            labeling.placement = QgsPalLayerSettings.Line # Was Parallel
         else:
             labeling.placement = QgsPalLayerSettings.Line
 

@@ -16,7 +16,9 @@ from qgis.core import (
     QgsSimpleLineSymbolLayer,
     QgsSimpleFillSymbolLayer,
     QgsSymbolLayer,
-    QgsUnitTypes
+    QgsUnitTypes,
+    QgsFontMarkerSymbolLayer,
+    QgsMarkerLineSymbolLayer,
 )
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
@@ -98,75 +100,120 @@ class SymbolFactory:
     @staticmethod
     def create_marker_symbol(symbol_def: Dict[str, Any]) -> QgsMarkerSymbol:
         """
-        Create a QGIS marker symbol from an ArcGIS CIM definition, correctly
-        handling symbols with and without fills by explicitly setting the stroke style.
+        Create a QGIS marker symbol from an ArcGIS CIM definition, handling both
+        CIMVectorMarker (shapes) and CIMCharacterMarker (fonts).
         """
         marker_symbol = QgsMarkerSymbol()
         marker_symbol.deleteSymbolLayer(0)  # Start with a blank symbol
 
-        # Find the main vector marker definition
-        arc_symbol_layers = symbol_def.get("symbolLayers", [])
-        vector_marker_def = next((ld for ld in arc_symbol_layers if ld.get("type") == "CIMVectorMarker"), None)
+        # The definition can be a composite symbol with layers, or a direct marker definition
+        arc_layers = symbol_def.get("symbolLayers", [])
+        if not arc_layers and "type" in symbol_def:
+            arc_layers = [symbol_def]
 
-        if not vector_marker_def:
+        if not arc_layers:
             marker_symbol.appendSymbolLayer(SymbolFactory._create_default_marker_layer())
             return marker_symbol
 
-        marker_layer = QgsSimpleMarkerSymbolLayer()
+        # Look for the primary marker type within the definition's layers
+        vector_def = next((l for l in arc_layers if l.get("type") == "CIMVectorMarker"), None)
+        char_def = next((l for l in arc_layers if l.get("type") == "CIMCharacterMarker"), None)
 
-        # Set basic properties: size and shape
-        size = vector_marker_def.get("size", 6.0)
-        shape = SymbolFactory._determine_marker_shape(vector_marker_def)
-        marker_layer.setSize(size)
-        marker_layer.setSizeUnit(QgsUnitTypes.RenderPoints)
-        marker_layer.setShape(shape)
+        qgis_layer = None
+        if vector_def:
+            qgis_layer = SymbolFactory._create_simple_marker_from_vector(vector_def)
+        elif char_def:
+            qgis_layer = SymbolFactory._create_font_marker_from_character(char_def)
 
-        # Find the nested fill and stroke definitions from the JSON
-        graphic = vector_marker_def.get("markerGraphics", [{}])[0]
-        graphic_symbol_layers = graphic.get("symbol", {}).get("symbolLayers", [])
-        fill_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidFill"), None)
-        stroke_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidStroke"), None)
-
-        # 1. Configure the FILL (Interior)
-        if fill_def:
-            fill_color = parse_color(fill_def.get("color"))
-            if fill_color and fill_color.alpha() > 0:
-                marker_layer.setColor(fill_color)
-            else:
-                marker_layer.setColor(QColor(0, 0, 0, 0)) # Set transparent
+        if qgis_layer:
+            marker_symbol.appendSymbolLayer(qgis_layer)
         else:
-            marker_layer.setColor(QColor(0, 0, 0, 0)) # Set transparent
-
-        # 2. Configure the STROKE (Outline)
-        if stroke_def:
-            stroke_color = parse_color(stroke_def.get("color"))
-            stroke_width = stroke_def.get("width", 0.26)
-            if stroke_color and stroke_width > 0:
-                # THIS IS THE CRUCIAL FIX:
-                # We must explicitly set the style to solid for the color and width to apply.
-                marker_layer.setStrokeStyle(Qt.SolidLine)
-                marker_layer.setStrokeColor(stroke_color)
-                marker_layer.setStrokeWidth(stroke_width)
-                marker_layer.setStrokeWidthUnit(QgsUnitTypes.RenderPoints)
-            else:
-                marker_layer.setStrokeStyle(Qt.NoPen)
-        else:
-            marker_layer.setStrokeStyle(Qt.NoPen)
-        
-        marker_symbol.appendSymbolLayer(marker_layer)
+            # Fallback if parsing failed or type not found
+            logger.warning(f"Could not create a specific marker layer for symbol; using default.")
+            marker_symbol.appendSymbolLayer(SymbolFactory._create_default_marker_layer())
 
         return marker_symbol
+    
+    @staticmethod
+    def _create_simple_marker_from_vector(layer_def: Dict[str, Any]) -> Optional[QgsSimpleMarkerSymbolLayer]:
+        """Creates a QGIS Simple Marker from an ArcGIS CIMVectorMarker definition."""
+        try:
+            marker_layer = QgsSimpleMarkerSymbolLayer()
+
+            # Set basic properties: size, shape, and rotation
+            size = layer_def.get("size", 6.0)
+            shape = SymbolFactory._determine_marker_shape(layer_def)
+            rotation = layer_def.get("rotation", 0.0) # --- ADD THIS LINE ---
+            marker_layer.setSize(size)
+            marker_layer.setSizeUnit(QgsUnitTypes.RenderPoints)
+            marker_layer.setShape(shape)
+            marker_layer.setAngle(rotation) # --- ADD THIS LINE ---
+
+            # Find the nested fill and stroke definitions from the JSON
+            graphic = layer_def.get("markerGraphics", [{}])[0]
+            graphic_symbol_layers = graphic.get("symbol", {}).get("symbolLayers", [])
+            fill_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidFill"), None)
+            stroke_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidStroke"), None)
+
+            # Configure the FILL
+            if fill_def:
+                fill_color = parse_color(fill_def.get("color"))
+                if fill_color and fill_color.alpha() > 0:
+                    marker_layer.setColor(fill_color)
+                else:
+                    marker_layer.setColor(QColor(0, 0, 0, 0)) # Transparent
+            else:
+                marker_layer.setColor(QColor(0, 0, 0, 0)) # Transparent
+
+            # Configure the STROKE
+            if stroke_def:
+                stroke_color = parse_color(stroke_def.get("color"))
+                stroke_width = stroke_def.get("width", 0.26)
+                if stroke_color and stroke_width > 0:
+                    marker_layer.setStrokeStyle(Qt.SolidLine)
+                    marker_layer.setStrokeColor(stroke_color)
+                    marker_layer.setStrokeWidth(stroke_width)
+                    marker_layer.setStrokeWidthUnit(QgsUnitTypes.RenderPoints)
+                else:
+                    marker_layer.setStrokeStyle(Qt.NoPen)
+            else:
+                marker_layer.setStrokeStyle(Qt.NoPen)
+            
+            return marker_layer
+        except Exception as e:
+            logger.error(f"Failed to create simple marker from vector: {e}")
+            return None
+    
+    @staticmethod
+    def _create_font_marker_from_character(layer_def: Dict[str, Any]) -> Optional[QgsFontMarkerSymbolLayer]:
+        """Creates a QGIS Font Marker layer from a CIMCharacterMarker definition."""
+        try:
+            font_layer = QgsFontMarkerSymbolLayer()
+            font_family = layer_def.get("fontFamilyName", "Arial")
+            character_code = layer_def.get("characterIndex", 32) # Default to space
+            character = chr(character_code)
+
+            # The color/size info is in a nested symbol definition
+            nested_symbol_def = layer_def.get("symbol", {}).get("symbolLayers", [{}])[0]
+            color = parse_color(nested_symbol_def.get("color"))
+            size = nested_symbol_def.get("size", 6.0)
+
+            font_layer.setFontFamily(font_family)
+            font_layer.setCharacter(character)
+            font_layer.setColor(color if color else QColor("black"))
+            font_layer.setSize(size)
+            font_layer.setSizeUnit(QgsUnitTypes.RenderPoints)
+
+            return font_layer
+        except Exception as e:
+            logger.error(f"Failed to create font marker from character: {e}")
+            return None
             
     @staticmethod
     def create_line_symbol(symbol_def: Dict[str, Any]) -> QgsLineSymbol:
         """
         Create a QGIS line symbol from an ArcGIS line symbol definition.
-        
-        Args:
-            symbol_def: ArcGIS CIM line symbol definition
-            
-        Returns:
-            QgsLineSymbol: The created line symbol
+        Handles complex multi-layer symbols properly.
         """
         line_symbol = QgsLineSymbol()
         line_symbol.deleteSymbolLayer(0)  # Remove default layer
@@ -178,8 +225,9 @@ class SymbolFactory:
             line_symbol.appendSymbolLayer(default_layer)
             return line_symbol
         
-        # Process each symbol layer
-        for layer_def in symbol_layers:
+        # Process layers in reverse order to match ArcGIS rendering order
+        # (ArcGIS renders from bottom to top, QGIS from top to bottom)
+        for layer_def in reversed(symbol_layers):
             if not layer_def.get("enable", True):
                 continue
                 
@@ -187,6 +235,14 @@ class SymbolFactory:
             
             if layer_type == "CIMSolidStroke":
                 symbol_layer = SymbolFactory._create_solid_stroke_layer(layer_def)
+                if symbol_layer:
+                    line_symbol.appendSymbolLayer(symbol_layer)
+            elif layer_type == "CIMCharacterMarker":
+                symbol_layer = SymbolFactory._create_character_marker_line_layer(layer_def)
+                if symbol_layer:
+                    line_symbol.appendSymbolLayer(symbol_layer)
+            elif layer_type == "CIMVectorMarker":
+                symbol_layer = SymbolFactory._create_vector_marker_line_layer(layer_def)
                 if symbol_layer:
                     line_symbol.appendSymbolLayer(symbol_layer)
             else:
@@ -198,6 +254,158 @@ class SymbolFactory:
             line_symbol.appendSymbolLayer(default_layer)
             
         return line_symbol
+    
+    @staticmethod
+    def _create_character_marker_line_layer(layer_def: Dict[str, Any]) -> Optional[QgsMarkerLineSymbolLayer]:
+        """Creates a QGIS Marker Line from an ArcGIS CIMCharacterMarker definition."""
+        try:
+            # 1. Create the font marker that will be placed on the line
+            font_symbol_layer = QgsFontMarkerSymbolLayer()
+            
+            # Extract properties from the CIM definition
+            font_family = layer_def.get("fontFamilyName", "Arial")
+            # The characterIndex is the Unicode value of the character
+            character_code = layer_def.get("characterIndex", 32) # Default to space
+            character = chr(character_code)
+            
+            # Find the nested symbol to get the color and size
+            nested_symbol_def = layer_def.get("symbol", {}).get("symbolLayers", [{}])[0]
+            color = parse_color(nested_symbol_def.get("color"))
+            size = nested_symbol_def.get("size", 6.0)
+
+            font_symbol_layer.setFontFamily(font_family)
+            font_symbol_layer.setCharacter(character)
+            font_symbol_layer.setColor(color if color else QColor("black"))
+            font_symbol_layer.setSize(size)
+            font_symbol_layer.setSizeUnit(QgsUnitTypes.RenderPoints)
+
+            # Wrap the font marker layer in a full marker symbol
+            marker_symbol = QgsMarkerSymbol()
+            marker_symbol.changeSymbolLayer(0, font_symbol_layer)
+
+            # 2. Create the marker line and set our font marker as its symbol
+            marker_line_layer = QgsMarkerLineSymbolLayer()
+            marker_line_layer.setSubSymbol(marker_symbol)
+
+            # 3. Configure placement (how often the character repeats)
+            placement = layer_def.get("markerPlacement", {})
+            if placement.get("type") == "CIMMarkerPlacementAlongLineSameSize":
+                interval = placement.get("placementTemplate", [10])[0]
+                marker_line_layer.setInterval(interval)
+                marker_line_layer.setIntervalUnit(QgsUnitTypes.RenderPoints)
+
+            return marker_line_layer
+
+        except Exception as e:
+            logger.error(f"Failed to create character marker line layer: {e}")
+            return None
+
+    @staticmethod
+    def _create_vector_marker_line_layer(layer_def: Dict[str, Any]) -> Optional[QgsMarkerLineSymbolLayer]:
+        """
+        Creates a QGIS Marker Line from an ArcGIS CIMVectorMarker definition.
+        Improved to handle various marker types and placement patterns.
+        """
+        try:
+            # Extract key properties
+            size = layer_def.get("size", 4.0)
+            rotation = layer_def.get("rotation", 0.0)
+            
+            # Analyze the marker graphics to determine what type of marker this is
+            marker_graphics = layer_def.get("markerGraphics", [])
+            if not marker_graphics:
+                return None
+            
+            graphic = marker_graphics[0]
+            geometry = graphic.get("geometry", {})
+            
+            # Create appropriate marker based on geometry type
+            marker_symbol = QgsMarkerSymbol()
+            marker_symbol.deleteSymbolLayer(0)
+            
+            if "paths" in geometry:
+                # Line-based marker (like tick marks)
+                line_marker = QgsSimpleMarkerSymbolLayer()
+                line_marker.setShape(QgsSimpleMarkerSymbolLayer.Line)
+                
+                # Calculate appropriate size
+                frame = layer_def.get("frame", {})
+                if frame:
+                    frame_width = abs(frame.get("xmax", 1) - frame.get("xmin", -1))
+                    frame_height = abs(frame.get("ymax", 1) - frame.get("ymin", -1))
+                    marker_size = max(frame_width, frame_height) * size / 2
+                else:
+                    marker_size = size
+                
+                # Ensure reasonable size
+                marker_size = max(marker_size, 2.0)
+                marker_size = min(marker_size, 20.0)  # Prevent overly large markers
+                
+                line_marker.setSize(marker_size)
+                line_marker.setSizeUnit(QgsUnitTypes.RenderPoints)
+                line_marker.setAngle(rotation)
+                
+                # Set color from nested symbol
+                symbol_def = graphic.get("symbol", {})
+                if symbol_def:
+                    symbol_layers = symbol_def.get("symbolLayers", [])
+                    if symbol_layers:
+                        stroke_color = parse_color(symbol_layers[0].get("color"))
+                        if stroke_color:
+                            line_marker.setColor(stroke_color)
+                
+                marker_symbol.appendSymbolLayer(line_marker)
+                
+            else:
+                # For other marker types, use existing logic
+                marker_symbol = SymbolFactory.create_marker_symbol(layer_def)
+                if not marker_symbol:
+                    return None
+
+            # Create the marker line layer
+            marker_line_layer = QgsMarkerLineSymbolLayer()
+            marker_line_layer.setSubSymbol(marker_symbol)
+
+            # Configure placement
+            placement = layer_def.get("markerPlacement", {})
+            placement_type = placement.get("type", "")
+            
+            if "AlongLineSameSize" in placement_type:
+                template = placement.get("placementTemplate", [10])
+                interval = template[0] if template else 10
+                
+                # Ensure reasonable interval
+                interval = max(interval, 2.0)
+                interval = min(interval, 100.0)
+                
+                marker_line_layer.setInterval(interval)
+                marker_line_layer.setIntervalUnit(QgsUnitTypes.RenderPoints)
+                
+                # Handle offset
+                offset = placement.get("offset", 0)
+                if offset != 0:
+                    marker_line_layer.setOffset(offset)
+                    marker_line_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
+                    
+                # Handle offset along line
+                offset_along = placement.get("offsetAlongLine", 0)
+                if offset_along != 0:
+                    marker_line_layer.setOffsetAlongLine(offset_along)
+                    marker_line_layer.setOffsetAlongLineUnit(QgsUnitTypes.RenderPoints)
+            
+            elif "AtRatioPositions" in placement_type:
+                # Handle ratio-based placement
+                positions = placement.get("positionArray", [0.5])
+                if positions:
+                    # For now, convert to interval-based placement
+                    # This is a simplification but should work for most cases
+                    marker_line_layer.setPlacement(QgsMarkerLineSymbolLayer.CentralPoint)
+            
+            return marker_line_layer
+
+        except Exception as e:
+            logger.error(f"Failed to create vector marker line layer: {e}")
+            return None
     
     @staticmethod
     def create_fill_symbol(symbol_def: Dict[str, Any]) -> QgsFillSymbol:
@@ -247,30 +455,85 @@ class SymbolFactory:
     
     @staticmethod
     def _create_solid_stroke_layer(layer_def: Dict[str, Any]) -> Optional[QgsSimpleLineSymbolLayer]:
-        """Create a QGIS line symbol layer from a CIMSolidStroke definition."""
+        """
+        Create a QGIS line symbol layer from a CIMSolidStroke definition.
+        Improved to handle offsets, dash patterns, and ensure visibility.
+        """
         try:
             line_layer = QgsSimpleLineSymbolLayer()
             
-            # Set color
+            # Set color and width
             color = parse_color(layer_def.get("color"))
-            line_layer.setColor(color)
-            
-            # Set width
             width = layer_def.get("width", 0.5)
+            
+            # Ensure minimum width for visibility, but don't alter intended thin lines too much
+            if width > 0:
+                width = max(width, 0.1)
+            
+            if color:
+                line_layer.setColor(color)
             line_layer.setWidth(width)
             line_layer.setWidthUnit(QgsUnitTypes.RenderPoints)
             
-            # Set line style (if available in the future)
-            # line_style = layer_def.get("lineStyle", "Solid")
-            # qt_style = SymbolFactory.LINE_STYLE_MAP.get(line_style, Qt.SolidLine)
-            # line_layer.setPenStyle(qt_style)
+            # Set cap and join styles from ArcGIS definition
+            cap_style = layer_def.get("capStyle", "Round")
+            if cap_style == "Round":
+                line_layer.setPenCapStyle(Qt.RoundCap)
+            elif cap_style == "Butt":
+                line_layer.setPenCapStyle(Qt.FlatCap)
+            elif cap_style == "Square":
+                line_layer.setPenCapStyle(Qt.SquareCap)
+                
+            join_style = layer_def.get("joinStyle", "Round")
+            if join_style == "Round":
+                line_layer.setPenJoinStyle(Qt.RoundJoin)
+            elif join_style == "Miter":
+                line_layer.setPenJoinStyle(Qt.MiterJoin)
+            elif join_style == "Bevel":
+                line_layer.setPenJoinStyle(Qt.BevelJoin)
+            
+            # Process effects
+            effects = layer_def.get("effects", [])
+            for effect in effects:
+                effect_type = effect.get("type")
+
+                if effect_type == "CIMGeometricEffectOffset":
+                    offset = effect.get("offset", 0.0)
+                    line_layer.setOffset(offset)
+                    line_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
+
+                elif effect_type == "CIMGeometricEffectDashes":
+                    dash_template = effect.get("dashTemplate", [])
+                    
+                    if dash_template:
+                        # Clean the dash template more carefully
+                        cleaned_template = []
+                        for value in dash_template:
+                            if isinstance(value, (int, float)) and value >= 0:
+                                cleaned_template.append(float(value))
+                        
+                        # Remove leading and trailing zeros
+                        while cleaned_template and cleaned_template[0] == 0:
+                            cleaned_template.pop(0)
+                        while cleaned_template and cleaned_template[-1] == 0:
+                            cleaned_template.pop()
+                        
+                        # Only apply if we have a valid pattern
+                        if len(cleaned_template) >= 2:
+                            # Ensure minimum dash/gap sizes for visibility
+                            min_size = 0.5
+                            cleaned_template = [max(x, min_size) if x > 0 else min_size for x in cleaned_template]
+                            
+                            line_layer.setCustomDashVector(cleaned_template)
+                            line_layer.setCustomDashPatternUnit(QgsUnitTypes.RenderPoints)
+                            line_layer.setUseCustomDashPattern(True)
             
             return line_layer
             
         except Exception as e:
             logger.error(f"Failed to create solid stroke layer: {e}")
             return None
-    
+
     @staticmethod
     def _determine_marker_shape(layer_def: Dict[str, Any]) -> QgsSimpleMarkerSymbolLayer.Shape:
         """Determine the QGIS marker shape from ArcGIS marker definition."""
@@ -287,6 +550,9 @@ class SymbolFactory:
         
         # Analyze geometry to determine shape
         geometry = graphic.get("geometry", {})
+
+        if "paths" in geometry:
+            return QgsSimpleMarkerSymbolLayer.Line
         
         if "rings" in geometry:
             points = geometry["rings"][0]
