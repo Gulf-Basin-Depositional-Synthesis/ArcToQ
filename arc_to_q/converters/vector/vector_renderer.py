@@ -162,15 +162,92 @@ class RendererFactory:
         
         return "\n".join(case_parts)
     
-    def _create_categorized_renderer(self, renderer_def: Dict[str, Any], 
-                                    layer: QgsVectorLayer) -> QgsFeatureRenderer:
+    def _create_bivariate_renderer(self, renderer_def: Dict[str, Any],
+                                   layer: QgsVectorLayer) -> QgsCategorizedSymbolRenderer:
         """
-        Create a QGIS categorized or rule-based renderer from a CIMUniqueValueRenderer definition.
+        Creates a QGIS categorized renderer from an ArcGIS Bivariate Renderer definition.
         
-        If the renderer uses a simple field, it creates a QgsCategorizedSymbolRenderer.
-        If it uses an Arcade expression, it translates the expression and creates a categorized renderer.
+        This reads the clean data from the 'authoringInfo' block instead of parsing
+        the complex Arcade expression.
         """
-        # --- HANDLE SIMPLE FIELD-BASED RENDERER (Unchanged) ---
+        logger.info("Bivariate renderer detected. Building from 'authoringInfo'.")
+        
+        try:
+            # 1. Extract the clean field and break info
+            authoring_info = renderer_def["authoringInfo"]
+            field_infos = authoring_info["fieldInfos"]
+            
+            field1_info = field_infos[0]
+            field2_info = field_infos[1]
+            
+            field1_name = f'"{field1_info["field"]}"'
+            field2_name = f'"{field2_info["field"]}"'
+            
+            breaks1 = field1_info["upperBounds"]
+            breaks2 = field2_info["upperBounds"]
+            
+            class_codes = ["L", "M", "H"] # Low, Medium, High
+
+            # 2. Build the QGIS CASE statement for the first field
+            case1_parts = ["CASE"]
+            for i, bound in enumerate(breaks1):
+                case1_parts.append(f'    WHEN {field1_name} <= {bound} THEN \'{class_codes[i]}\'')
+            case1_parts.append("END")
+            qgis_expr1 = "\n".join(case1_parts)
+            
+            # 3. Build the QGIS CASE statement for the second field
+            case2_parts = ["CASE"]
+            for i, bound in enumerate(breaks2):
+                case2_parts.append(f'    WHEN {field2_name} <= {bound} THEN \'{class_codes[i]}\'')
+            case2_parts.append("END")
+            qgis_expr2 = "\n".join(case2_parts)
+            
+            # 4. Combine the two expressions
+            combined_expr = f"({qgis_expr1}) || ({qgis_expr2})"
+            logger.info(f"Generated Bivariate Expression: {combined_expr}")
+
+        except (KeyError, IndexError) as e:
+            raise RendererCreationError(f"Failed to parse bivariate 'authoringInfo': {e}")
+
+        # 5. Extract categories and symbols (this logic is the same as before)
+        categories = []
+        for group in renderer_def.get("groups", []):
+            for uv_class in group.get("classes", []):
+                try:
+                    value = uv_class["values"][0]["fieldValues"][0]
+                    label = uv_class.get("label")
+                    symbol_def = uv_class.get("symbol")
+                    
+                    symbol = self.symbol_factory.create_symbol(symbol_def)
+                    if not symbol:
+                        symbol = self._create_default_symbol(layer)
+
+                    categories.append(QgsRendererCategory(value, symbol, label))
+                except (KeyError, IndexError):
+                    continue
+        
+        if not categories:
+            raise RendererCreationError("Failed to create any categories for bivariate renderer.")
+
+        # 6. Create and return the final renderer
+        renderer = QgsCategorizedSymbolRenderer(combined_expr, categories)
+        self._apply_common_renderer_properties(renderer, renderer_def)
+        return renderer
+    
+    def _create_categorized_renderer(self, renderer_def: Dict[str, Any], 
+                                   layer: QgsVectorLayer) -> QgsFeatureRenderer:
+        """
+        Controller function for CIMUniqueValueRenderer.
+        
+        It detects the type of renderer (Bivariate, Expression, or Simple Field)
+        and calls the appropriate helper function to create it.
+        """
+        # --- NEW: Check for Bivariate data FIRST ---
+        authoring_info = renderer_def.get("authoringInfo", {})
+        if authoring_info.get("type") == "CIMBivariateRendererAuthoringInfo":
+            return self._create_bivariate_renderer(renderer_def, layer)
+
+        # --- HANDLE SIMPLE FIELD-BASED RENDERER ---
         field_names = renderer_def.get("fieldNames", [])
         if field_names:
             if len(field_names) > 1:
@@ -199,7 +276,7 @@ class RendererFactory:
             self._apply_common_renderer_properties(renderer, renderer_def)
             return renderer
 
-        # --- NEW: DYNAMICALLY HANDLE ARCADE EXPRESSION ---
+        # --- DYNAMICALLY HANDLE OTHER ARCADE EXPRESSIONS ---
         expression_info = renderer_def.get("valueExpressionInfo")
         if expression_info:
             arcade_expr = expression_info.get("expression", "")
@@ -224,7 +301,6 @@ class RendererFactory:
 
                         categories.append(QgsRendererCategory(value, symbol, label))
                     except (KeyError, IndexError):
-                        logger.warning(f"Could not parse a unique value class within group '{group.get('heading')}'. Skipping.")
                         continue
             
             if not categories:
