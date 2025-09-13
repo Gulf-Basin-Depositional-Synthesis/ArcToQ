@@ -10,7 +10,7 @@ from qgis.core import (
     QgsLayerDefinition,
     QgsReadWriteContext,
     QgsRasterLayer,
-    QgsProject
+    QgsCoordinateReferenceSystem,
 )
 
 #from arc_to_q.converters.symbology_converter import set_symbology
@@ -73,6 +73,50 @@ def _parse_source(in_folder, data_connection, out_file):
         return abs_uri, rel_uri
     else:
         raise NotImplementedError(f"Unsupported workspaceFactory: {factory}")
+
+def _parse_raster_source(in_folder, data_connection, out_file):
+    """Build both absolute and relative QGIS-friendly URIs for a raster dataset.
+    
+    Args:
+        in_folder (str): The absolute path to the input folder containing the .lyrx file.
+        data_connection (dict): The data connection information from the .lyrx file.
+        out_file (str): The output file path for the converted QGIS layer.
+
+    Returns:
+        tuple: (absolute path, relative path) where each is a QGIS data source string.
+    """
+    factory = data_connection.get("workspaceFactory")
+    conn_str = data_connection.get("workspaceConnectionString", "")
+    dataset = data_connection.get("dataset")
+
+    if not factory or not conn_str or not dataset:
+        raise ValueError("Missing required fields in dataConnection.")
+
+    # Extract path from ArcGIS-style connection string
+    # Example: "DATABASE=G:\\Current_Database\\Database\\tif\\SandGrainVol" → "G:\\Current_Database\\Database\\tif\\SandGrainVol"
+    if "=" in conn_str:
+        _, raw_path = conn_str.split("=", 1)
+    else:
+        raw_path = conn_str
+
+    # For raster data, the dataset is the actual filename, not a layer name
+    # So we need to join the workspace path with the dataset filename
+    lyrx_dir = Path(in_folder)
+    workspace_path = (lyrx_dir / raw_path).resolve()
+    
+    # Build the full raster file path
+    if factory == "Raster":
+        abs_path = workspace_path / dataset
+        abs_uri = abs_path.as_posix()
+        
+        # Build relative URI for saving in QLR
+        out_dir = Path(out_file).parent.resolve()
+        rel_path = Path(os.path.relpath(abs_path, start=out_dir))
+        rel_uri = rel_path.as_posix()
+        
+        return abs_uri, rel_uri
+    else:
+        raise NotImplementedError(f"Unsupported raster workspaceFactory: {factory}")
 
 
 def _set_scale_visibility(layer: QgsVectorLayer, layer_def: dict):
@@ -173,6 +217,25 @@ def _set_definition_query(layer: QgsVectorLayer, layer_def: dict):
     else:
         print("Error: Failed to apply query. The layer's subset string is still empty.")
         print("This often happens if the layer is invalid or the query syntax is incorrect for the data provider.")
+
+def create_gbds_albers_crs():
+    """
+    Creates a custom CRS for GBDS_Albers_Full_ft based on typical Albers projections.
+    This is a best guess - you should get the exact parameters from your organization.
+    """
+    # This is a template - you'll need the exact parameters
+    # Common Albers Equal Area parameters for US data in feet:
+    proj4_string = '+proj=aea +lat_0=23 +lon_0=-96 +lat_1=29.5 +lat_2=45.5 +x_0=0 +y_0=0 +datum=NAD83 +units=ft +no_defs'
+    
+    custom_crs = QgsCoordinateReferenceSystem()
+    success = custom_crs.createFromProj(proj4_string)
+    
+    if success:
+        print(f"Created custom CRS: {custom_crs.description()}")
+        return custom_crs
+    else:
+        print("Failed to create custom CRS")
+        return None
     
 
 
@@ -245,25 +308,129 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         elif layer_def.get("type") == 'CIMRasterLayer':
             print(f"Processing Raster Layer: {layer_def.get('name')}")
             
-            # 1. Construct the path to the raster file
+            # Use the raster-specific path parsing logic
             data_connection = layer_def.get('dataConnection', {})
-            workspace = data_connection.get('workspaceConnectionString', '').replace('DATABASE=', '')
-            dataset = data_connection.get('dataset', '')
+            try:
+                abs_uri, rel_uri = _parse_raster_source(in_folder, data_connection, out_file)
+            except Exception as e:
+                print(f"Error parsing raster source: {e}")
+                return
             
-            if not workspace or not dataset:
-                print(f"Could not determine raster path for {layer_def.get('name')}")
-                return
-                
-            raster_path = os.path.join(workspace, dataset)
-            layer_name = layer_def.get('name', os.path.basename(raster_path))
+            layer_name = layer_def.get('name', os.path.basename(abs_uri))
+            print(f"Attempting to load raster from: {abs_uri}")
 
-            # 2. Create the QGIS raster layer object
-            qgis_layer = QgsRasterLayer(raster_path, layer_name)
+            # Create the QGIS raster layer object with absolute path first
+            qgis_layer = QgsRasterLayer(abs_uri, layer_name)
             if not qgis_layer.isValid():
-                print(f"Failed to load raster layer: {raster_path}")
+                print(f"Failed to load raster layer: {abs_uri}")
+                print(f"Error: {qgis_layer.error().summary()}")
+                
+                # Try to check if file exists
+                if os.path.exists(abs_uri):
+                    print(f"File exists but GDAL cannot read it. Check file format/permissions.")
+                else:
+                    print(f"File does not exist at: {abs_uri}")
                 return
 
-            # 3. Get the symbology info from the colorizer
+            # Check current CRS
+            current_crs = qgis_layer.crs()
+            print(f"Current CRS: {current_crs.authid()} - {current_crs.description()}")
+            
+            # Handle custom CRS issue
+            if not current_crs.isValid() or current_crs.description() == "GBDS_Albers_Full_ft":
+                print("Detected custom/invalid CRS. Attempting to create GBDS Albers projection...")
+                
+                # Try to create the custom CRS
+                custom_crs = create_gbds_albers_crs()
+                if custom_crs and custom_crs.isValid():
+                    print(f"Setting custom CRS: {custom_crs.description()}")
+                    qgis_layer.setCrs(custom_crs)
+                else:
+                    print("Custom CRS creation failed, trying standard projections...")
+                    # Fall back to standard projections
+                    candidate_crs = [
+                        "EPSG:2163",    # US National Atlas Equal Area (meters)
+                        "EPSG:5070",    # NAD83 Conus Albers (meters)
+                        "EPSG:3081",    # NAD83 / Texas Centric Albers Equal Area (feet)
+                        "EPSG:2780",    # NAD83(HARN) / Texas State Mapping System (feet)
+                        "EPSG:3857",    # Web Mercator (meters) - last resort
+                    ]
+                    
+                    for crs_code in candidate_crs:
+                        test_crs = QgsCoordinateReferenceSystem(crs_code)
+                        if test_crs.isValid():
+                            print(f"Trying CRS: {crs_code} - {test_crs.description()}")
+                            qgis_layer.setCrs(test_crs)
+                            print(f"Set CRS to: {test_crs.authid()} - {test_crs.description()}")
+                            break
+                
+                # Alternative: Try to create CRS from the raster's spatial extent
+                # This is a fallback if none of the standard projections work well
+            
+            # Look for any CRS information in the layer definition (just in case)
+            spatial_reference = layer_def.get('spatialReference')
+            if spatial_reference:
+                wkid = spatial_reference.get('wkid')
+                latest_wkid = spatial_reference.get('latestWkid')
+                wkt = spatial_reference.get('wkt')
+                
+                print(f"Found ArcGIS CRS info - WKID: {wkid}, Latest WKID: {latest_wkid}")
+                
+                # Try to set the correct CRS from ArcGIS info
+                target_crs = None
+                if latest_wkid:
+                    target_crs = QgsCoordinateReferenceSystem(f"EPSG:{latest_wkid}")
+                elif wkid:
+                    target_crs = QgsCoordinateReferenceSystem(f"EPSG:{wkid}")
+                elif wkt:
+                    target_crs = QgsCoordinateReferenceSystem()
+                    target_crs.createFromWkt(wkt)
+                    
+                if target_crs and target_crs.isValid():
+                    print(f"Setting CRS from ArcGIS to: {target_crs.authid()} - {target_crs.description()}")
+                    qgis_layer.setCrs(target_crs)
+            
+            # Add debugging information
+            print("=== RASTER DEBUGGING INFO ===")
+            data_provider = qgis_layer.dataProvider()
+            if data_provider:
+                print(f"Raster width: {qgis_layer.width()}")
+                print(f"Raster height: {qgis_layer.height()}")
+                print(f"Band count: {qgis_layer.bandCount()}")
+                
+                # Get the raster extent
+                extent = qgis_layer.extent()
+                print(f"Extent: {extent.toString()}")
+                
+                # Try to get transform information (method varies by QGIS version)
+                try:
+                    # Try different methods to get geotransform
+                    if hasattr(data_provider, 'geoTransform'):
+                        transform = data_provider.geoTransform()
+                    else:
+                        # Alternative method for older QGIS versions
+                        transform = None
+                        print("Cannot access geotransform directly")
+                        
+                    if transform:
+                        print(f"GeoTransform: {transform}")
+                        print(f"  - Top-left X: {transform[0]}")
+                        print(f"  - Pixel width: {transform[1]}")  
+                        print(f"  - X rotation: {transform[2]}")    # This might be the issue!
+                        print(f"  - Top-left Y: {transform[3]}")
+                        print(f"  - Y rotation: {transform[4]}")    # This might be the issue!
+                        print(f"  - Pixel height: {transform[5]}")
+                        
+                        # Check if there's rotation in the transform
+                        if transform[2] != 0 or transform[4] != 0:
+                            print("*** WARNING: Raster has rotation in its geotransform! ***")
+                            print(f"X rotation: {transform[2]}, Y rotation: {transform[4]}")
+                except Exception as e:
+                    print(f"Could not get geotransform: {e}")
+                
+            print("=== END DEBUGGING INFO ===")
+
+            # Get the symbology info from the colorizer
             colorizer_def = layer_def.get('colorizer', {})
             if colorizer_def:
                 # Check if the colorizer is the classified type we support
@@ -274,7 +441,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
                         # Apply the renderer to the layer
                         qgis_layer.setRenderer(renderer)
                 
-                # 4. Set resampling method on the raster layer's data provider
+                # Set resampling method on the raster layer's data provider
                 resampling = get_resampling_method(colorizer_def)
                 data_provider = qgis_layer.dataProvider()
                 if data_provider:
@@ -283,7 +450,16 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
                     # Set resampling for zoomed out (overview) display  
                     data_provider.setZoomedOutResamplingMethod(resampling)
             
-            # 5. Set this as the out_layer for further processing
+            # Switch to relative path (similar to how vector layers are handled)
+            qgis_layer.setDataSource(rel_uri, qgis_layer.name(), qgis_layer.providerType())
+            
+            if not qgis_layer.isValid():
+                print(f"CRITICAL ERROR: Raster layer '{layer_name}' became invalid after setting relative path.")
+                print(f"Relative path: {rel_uri}")
+                print(f"Error: {qgis_layer.error().summary()}")
+                raise RuntimeError(f"Raster layer became invalid: {layer_name}")
+            
+            # Set this as the out_layer for further processing
             out_layer = qgis_layer
         else:
             raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
