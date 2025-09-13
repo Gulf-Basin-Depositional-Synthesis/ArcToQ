@@ -1,3 +1,4 @@
+
 """
 Vector symbol creation module for ArcGIS to QGIS conversion.
 
@@ -5,7 +6,7 @@ This module provides factories for creating QGIS symbols from ArcGIS CIM symbol 
 It consolidates symbol creation logic that was previously scattered across multiple files.
 """
 
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 import logging
 
 from qgis.core import (
@@ -143,11 +144,11 @@ class SymbolFactory:
             # Set basic properties: size, shape, and rotation
             size = layer_def.get("size", 6.0)
             shape = SymbolFactory._determine_marker_shape(layer_def)
-            rotation = layer_def.get("rotation", 0.0) # --- ADD THIS LINE ---
+            rotation = layer_def.get("rotation", 0.0)
             marker_layer.setSize(size)
             marker_layer.setSizeUnit(QgsUnitTypes.RenderPoints)
             marker_layer.setShape(shape)
-            marker_layer.setAngle(rotation) # --- ADD THIS LINE ---
+            marker_layer.setAngle(rotation)
 
             # Find the nested fill and stroke definitions from the JSON
             graphic = layer_def.get("markerGraphics", [{}])[0]
@@ -186,7 +187,12 @@ class SymbolFactory:
     
     @staticmethod
     def _create_font_marker_from_character(layer_def: Dict[str, Any]) -> Optional[QgsFontMarkerSymbolLayer]:
-        """Creates a QGIS Font Marker layer from a CIMCharacterMarker definition."""
+        """
+        Creates a QGIS Font Marker layer from a CIMCharacterMarker definition.
+        NOTE: This function relies on a correct mapping from ESRI font characterIndex to
+        a Unicode character. For custom/non-Unicode ESRI fonts, this may produce
+        incorrect glyphs. Prefer CIMVectorMarker with embedded geometry where possible.
+        """
         try:
             font_layer = QgsFontMarkerSymbolLayer()
             font_family = layer_def.get("fontFamilyName", "Arial")
@@ -225,187 +231,151 @@ class SymbolFactory:
             line_symbol.appendSymbolLayer(default_layer)
             return line_symbol
         
-        # Process layers in reverse order to match ArcGIS rendering order
-        # (ArcGIS renders from bottom to top, QGIS from top to bottom)
         for layer_def in reversed(symbol_layers):
             if not layer_def.get("enable", True):
                 continue
                 
             layer_type = layer_def.get("type")
             
+            qgis_layers: List[QgsSymbolLayer] = []
             if layer_type == "CIMSolidStroke":
-                symbol_layer = SymbolFactory._create_solid_stroke_layer(layer_def)
-                if symbol_layer:
-                    line_symbol.appendSymbolLayer(symbol_layer)
+                layer = SymbolFactory._create_solid_stroke_layer(layer_def)
+                if layer:
+                    qgis_layers.append(layer)
             elif layer_type == "CIMCharacterMarker":
-                symbol_layer = SymbolFactory._create_character_marker_line_layer(layer_def)
-                if symbol_layer:
-                    line_symbol.appendSymbolLayer(symbol_layer)
+                qgis_layers = SymbolFactory._create_character_marker_line_layers(layer_def)
             elif layer_type == "CIMVectorMarker":
-                symbol_layer = SymbolFactory._create_vector_marker_line_layer(layer_def)
-                if symbol_layer:
-                    line_symbol.appendSymbolLayer(symbol_layer)
+                qgis_layers = SymbolFactory._create_vector_marker_line_layers(layer_def)
             else:
                 logger.warning(f"Unsupported line layer type: {layer_type}")
+
+            for layer in qgis_layers:
+                line_symbol.appendSymbolLayer(layer)
         
-        # If no valid layers were created, add a default one
         if line_symbol.symbolLayerCount() == 0:
             default_layer = SymbolFactory._create_default_line_layer()
             line_symbol.appendSymbolLayer(default_layer)
             
         return line_symbol
-    
+
     @staticmethod
-    def _create_character_marker_line_layer(layer_def: Dict[str, Any]) -> Optional[QgsMarkerLineSymbolLayer]:
-        """Creates a QGIS Marker Line from an ArcGIS CIMCharacterMarker definition."""
+    def _configure_basic_placement(marker_line_layer: QgsMarkerLineSymbolLayer, layer_def: Dict[str, Any]):
+        """Configures properties common to all placement types."""
+        placement = layer_def.get("markerPlacement", {})
+        if not placement:
+            return
+
+        use_map_units = layer_def.get("scaleSymbolsProportionally", False) or layer_def.get("respectFrame", False)
+        qgis_unit = QgsUnitTypes.RenderMapUnits if use_map_units else QgsUnitTypes.RenderPoints
+        
+        if placement.get("angleToLine", False):
+            marker_line_layer.setRotateMarker(True)
+
+    @staticmethod
+    def _create_character_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMarkerLineSymbolLayer]:
+        """Creates one or more QGIS Marker Line layers from an ArcGIS CIMCharacterMarker definition."""
         try:
-            # 1. Create the font marker that will be placed on the line
-            font_symbol_layer = QgsFontMarkerSymbolLayer()
-            
-            # Extract properties from the CIM definition
-            font_family = layer_def.get("fontFamilyName", "Arial")
-            # The characterIndex is the Unicode value of the character
-            character_code = layer_def.get("characterIndex", 32) # Default to space
-            character = chr(character_code)
-            
-            # Find the nested symbol to get the color and size
-            nested_symbol_def = layer_def.get("symbol", {}).get("symbolLayers", [{}])[0]
-            color = parse_color(nested_symbol_def.get("color"))
-            size = nested_symbol_def.get("size", 6.0)
-
-            font_symbol_layer.setFontFamily(font_family)
-            font_symbol_layer.setCharacter(character)
-            font_symbol_layer.setColor(color if color else QColor("black"))
-            font_symbol_layer.setSize(size)
-            font_symbol_layer.setSizeUnit(QgsUnitTypes.RenderPoints)
-
-            # Wrap the font marker layer in a full marker symbol
-            marker_symbol = QgsMarkerSymbol()
-            marker_symbol.changeSymbolLayer(0, font_symbol_layer)
-
-            # 2. Create the marker line and set our font marker as its symbol
-            marker_line_layer = QgsMarkerLineSymbolLayer()
-            marker_line_layer.setSubSymbol(marker_symbol)
-
-            # 3. Configure placement (how often the character repeats)
-            placement = layer_def.get("markerPlacement", {})
-            if placement.get("type") == "CIMMarkerPlacementAlongLineSameSize":
-                interval = placement.get("placementTemplate", [10])[0]
-                marker_line_layer.setInterval(interval)
-                marker_line_layer.setIntervalUnit(QgsUnitTypes.RenderPoints)
-
-            return marker_line_layer
-
+            sub_symbol_layer = SymbolFactory._create_font_marker_from_character(layer_def)
+            if not sub_symbol_layer:
+                return []
+            marker_symbol = QgsMarkerSymbol([sub_symbol_layer])
+            return SymbolFactory._create_marker_line_layers_from_sub_symbol(marker_symbol, layer_def)
         except Exception as e:
-            logger.error(f"Failed to create character marker line layer: {e}")
-            return None
+            logger.error(f"Failed to create character marker line layers: {e}")
+            return []
 
     @staticmethod
-    def _create_vector_marker_line_layer(layer_def: Dict[str, Any]) -> Optional[QgsMarkerLineSymbolLayer]:
-        """
-        Creates a QGIS Marker Line from an ArcGIS CIMVectorMarker definition.
-        Improved to handle various marker types and placement patterns.
-        """
+    def _create_vector_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMarkerLineSymbolLayer]:
+        """Creates one or more QGIS Marker Line layers from an ArcGIS CIMVectorMarker definition."""
         try:
-            # Extract key properties
-            size = layer_def.get("size", 4.0)
-            rotation = layer_def.get("rotation", 0.0)
+            marker_symbol = SymbolFactory.create_marker_symbol(layer_def)
+            if not marker_symbol or marker_symbol.symbolLayerCount() == 0:
+                logger.warning("Failed to create a valid sub-symbol for vector marker line.")
+                return []
+            return SymbolFactory._create_marker_line_layers_from_sub_symbol(marker_symbol, layer_def)
+        except Exception as e:
+            logger.error(f"Failed to create vector marker line layers: {e}")
+            return []
+
+    @staticmethod
+    def _create_marker_line_layers_from_sub_symbol(sub_symbol: QgsMarkerSymbol, layer_def: Dict[str, Any]) -> List[QgsMarkerLineSymbolLayer]:
+        """Creates marker line layers for a given sub-symbol based on placement rules."""
+        placement = layer_def.get("markerPlacement", {})
+        placement_type = placement.get("type", "")
+        
+        qgis_layers = []
+
+        if "AtRatioPositions" in placement_type:
+            positions = placement.get("positionArray", [0.5])
             
-            # Analyze the marker graphics to determine what type of marker this is
-            marker_graphics = layer_def.get("markerGraphics", [])
-            if not marker_graphics:
-                return None
-            
-            graphic = marker_graphics[0]
-            geometry = graphic.get("geometry", {})
-            
-            # Create appropriate marker based on geometry type
-            marker_symbol = QgsMarkerSymbol()
-            marker_symbol.deleteSymbolLayer(0)
-            
-            if "paths" in geometry:
-                # Line-based marker (like tick marks)
-                line_marker = QgsSimpleMarkerSymbolLayer()
-                line_marker.setShape(QgsSimpleMarkerSymbolLayer.Line)
+            # Handle the case that requires two separate layers for start and end vertices
+            if 0.0 in positions and 1.0 in positions:
+                # Layer 1: First Vertex
+                start_layer = QgsMarkerLineSymbolLayer()
+                start_layer.setSubSymbol(sub_symbol.clone())
+                SymbolFactory._configure_basic_placement(start_layer, layer_def)
+                start_layer.setPlacement(QgsMarkerLineSymbolLayer.Placement.FirstVertex)
+                qgis_layers.append(start_layer)
                 
-                # Calculate appropriate size
-                frame = layer_def.get("frame", {})
-                if frame:
-                    frame_width = abs(frame.get("xmax", 1) - frame.get("xmin", -1))
-                    frame_height = abs(frame.get("ymax", 1) - frame.get("ymin", -1))
-                    marker_size = max(frame_width, frame_height) * size / 2
+                # Layer 2: Last Vertex
+                end_layer = QgsMarkerLineSymbolLayer()
+                end_layer.setSubSymbol(sub_symbol.clone())
+                SymbolFactory._configure_basic_placement(end_layer, layer_def)
+                end_layer.setPlacement(QgsMarkerLineSymbolLayer.Placement.LastVertex)
+                qgis_layers.append(end_layer)
+                
+                # Handle any other positions if they exist
+                other_positions = [p for p in positions if p not in [0.0, 1.0]]
+                if other_positions:
+                     logger.warning(f"Combined start/end and other ratio positions ({other_positions}) are not fully supported.")
+
+            else: # Handle single position cases
+                marker_layer = QgsMarkerLineSymbolLayer()
+                marker_layer.setSubSymbol(sub_symbol.clone())
+                SymbolFactory._configure_basic_placement(marker_layer, layer_def)
+                if positions == [0.5]:
+                    marker_layer.setPlacement(QgsMarkerLineSymbolLayer.Placement.CentralPoint)
+                elif positions == [0.0]:
+                     marker_layer.setPlacement(QgsMarkerLineSymbolLayer.Placement.FirstVertex)
+                elif positions == [1.0]:
+                     marker_layer.setPlacement(QgsMarkerLineSymbolLayer.Placement.LastVertex)
                 else:
-                    marker_size = size
-                
-                # Ensure reasonable size
-                marker_size = max(marker_size, 2.0)
-                marker_size = min(marker_size, 20.0)  # Prevent overly large markers
-                
-                line_marker.setSize(marker_size)
-                line_marker.setSizeUnit(QgsUnitTypes.RenderPoints)
-                line_marker.setAngle(rotation)
-                
-                # Set color from nested symbol
-                symbol_def = graphic.get("symbol", {})
-                if symbol_def:
-                    symbol_layers = symbol_def.get("symbolLayers", [])
-                    if symbol_layers:
-                        stroke_color = parse_color(symbol_layers[0].get("color"))
-                        if stroke_color:
-                            line_marker.setColor(stroke_color)
-                
-                marker_symbol.appendSymbolLayer(line_marker)
-                
-            else:
-                # For other marker types, use existing logic
-                marker_symbol = SymbolFactory.create_marker_symbol(layer_def)
-                if not marker_symbol:
-                    return None
+                    logger.warning(f"Complex AtRatioPositions {positions} not fully supported; falling back to CentralPoint.")
+                    marker_layer.setPlacement(QgsMarkerLineSymbolLayer.Placement.CentralPoint)
+                qgis_layers.append(marker_layer)
 
-            # Create the marker line layer
-            marker_line_layer = QgsMarkerLineSymbolLayer()
-            marker_line_layer.setSubSymbol(marker_symbol)
+        elif "AlongLineSameSize" in placement_type:
+            marker_layer = QgsMarkerLineSymbolLayer()
+            marker_layer.setSubSymbol(sub_symbol.clone())
+            SymbolFactory._configure_basic_placement(marker_layer, layer_def)
+            
+            use_map_units = layer_def.get("scaleSymbolsProportionally", False) or layer_def.get("respectFrame", False)
+            qgis_unit = QgsUnitTypes.RenderMapUnits if use_map_units else QgsUnitTypes.RenderPoints
 
-            # Configure placement
-            placement = layer_def.get("markerPlacement", {})
-            placement_type = placement.get("type", "")
+            template = placement.get("placementTemplate", [10])
+            interval = template[0] if template else 10
+            marker_layer.setInterval(interval)
+            marker_layer.setIntervalUnit(qgis_unit)
             
-            if "AlongLineSameSize" in placement_type:
-                template = placement.get("placementTemplate", [10])
-                interval = template[0] if template else 10
-                
-                # Ensure reasonable interval
-                interval = max(interval, 2.0)
-                interval = min(interval, 100.0)
-                
-                marker_line_layer.setInterval(interval)
-                marker_line_layer.setIntervalUnit(QgsUnitTypes.RenderPoints)
-                
-                # Handle offset
-                offset = placement.get("offset", 0)
-                if offset != 0:
-                    marker_line_layer.setOffset(offset)
-                    marker_line_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
-                    
-                # Handle offset along line
-                offset_along = placement.get("offsetAlongLine", 0)
-                if offset_along != 0:
-                    marker_line_layer.setOffsetAlongLine(offset_along)
-                    marker_line_layer.setOffsetAlongLineUnit(QgsUnitTypes.RenderPoints)
+            offset = placement.get("offset", 0)
+            if offset != 0:
+                marker_layer.setOffset(offset)
+                marker_layer.setOffsetUnit(qgis_unit)
             
-            elif "AtRatioPositions" in placement_type:
-                # Handle ratio-based placement
-                positions = placement.get("positionArray", [0.5])
-                if positions:
-                    # For now, convert to interval-based placement
-                    # This is a simplification but should work for most cases
-                    marker_line_layer.setPlacement(QgsMarkerLineSymbolLayer.CentralPoint)
-            
-            return marker_line_layer
+            offset_along = placement.get("offsetAlongLine", 0)
+            if offset_along != 0:
+                marker_layer.setOffsetAlongLine(offset_along)
+                marker_layer.setOffsetAlongLineUnit(qgis_unit)
+                
+            qgis_layers.append(marker_layer)
+        
+        else: # Default or unknown placement
+            marker_layer = QgsMarkerLineSymbolLayer()
+            marker_layer.setSubSymbol(sub_symbol.clone())
+            SymbolFactory._configure_basic_placement(marker_layer, layer_def)
+            qgis_layers.append(marker_layer)
 
-        except Exception as e:
-            logger.error(f"Failed to create vector marker line layer: {e}")
-            return None
+        return qgis_layers
     
     @staticmethod
     def create_fill_symbol(symbol_def: Dict[str, Any]) -> QgsFillSymbol:
