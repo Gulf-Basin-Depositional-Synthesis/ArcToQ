@@ -148,8 +148,8 @@ def _set_definition_query(layer: QgsVectorLayer, layer_def: dict):
     definition_query = feature_table.get("definitionExpression")
 
     if not definition_query:
-        print("Result: No 'definitionExpression' found in the .lyrx file.")
-        print("------------------------------------")
+        #print("Result: No 'definitionExpression' found in the .lyrx file.")
+        #print("------------------------------------")
         return
 
     #print(f"Found ArcGIS query: {definition_query}")

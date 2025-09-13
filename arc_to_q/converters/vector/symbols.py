@@ -8,6 +8,9 @@ It consolidates symbol creation logic that was previously scattered across multi
 
 from typing import Optional, List, Dict, Any, Union
 import logging
+import base64
+import tempfile
+import os
 
 from qgis.core import (
     QgsMarkerSymbol,
@@ -20,6 +23,8 @@ from qgis.core import (
     QgsUnitTypes,
     QgsFontMarkerSymbolLayer,
     QgsMarkerLineSymbolLayer,
+    QgsLinePatternFillSymbolLayer,
+    QgsRasterFillSymbolLayer,
 )
 from qgis.PyQt.QtCore import Qt, QPointF
 from qgis.PyQt.QtGui import QColor
@@ -378,10 +383,6 @@ class SymbolFactory:
                 marker_layer.setOffset(offset)
                 marker_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
             
-            '''offset_along = placement.get("offsetAlongLine", 0)
-            if offset_along != 0:
-                marker_layer.setOffsetAlongLine(offset_along)
-                marker_layer.setOffsetAlongLineUnit(qgis_unit)'''
                 
             qgis_layers.append(marker_layer)
         
@@ -397,47 +398,128 @@ class SymbolFactory:
     def create_fill_symbol(symbol_def: Dict[str, Any]) -> QgsFillSymbol:
         """
         Create a QGIS fill symbol from an ArcGIS polygon/fill symbol definition.
-        This version correctly handles symbols with no fill (hollow).
+        Handles multi-layer fills including solid, hatch, and picture fills.
         """
         fill_symbol = QgsFillSymbol()
         fill_symbol.deleteSymbolLayer(0)  # Remove default layer
 
         symbol_layers = symbol_def.get("symbolLayers", [])
         if not symbol_layers:
-            # Create a default simple fill if no layers are defined at all
             fill_symbol.appendSymbolLayer(SymbolFactory._create_default_fill_layer())
             return fill_symbol
 
-        # Explicitly find the fill and stroke definitions from the symbol layers
-        fill_def = next((layer for layer in symbol_layers if layer.get("type") == "CIMSolidFill" and layer.get("enable", True)), None)
-        stroke_def = next((layer for layer in symbol_layers if layer.get("type") == "CIMSolidStroke" and layer.get("enable", True)), None)
+        # Process layers in reverse to match ArcGIS rendering order
+        for layer_def in reversed(symbol_layers):
+            if not layer_def.get("enable", True):
+                continue
 
-        fill_layer = QgsSimpleFillSymbolLayer()
+            layer_type = layer_def.get("type")
+            qgis_layer = None
 
-        # 1. Configure the FILL (Interior)
-        if fill_def:
-            fill_color = parse_color(fill_def.get("color"))
-            if fill_color:
-                fill_layer.setFillColor(fill_color)
-        else:
-            # THIS IS THE FIX: If no fill is defined, set the style to NoBrush.
-            fill_layer.setBrushStyle(Qt.NoBrush)
+            if layer_type == "CIMSolidFill":
+                # Create a simple fill layer for the solid color
+                fill_color = parse_color(layer_def.get("color"))
+                if fill_color:
+                    simple_fill = QgsSimpleFillSymbolLayer()
+                    simple_fill.setFillColor(fill_color)
+                    simple_fill.setStrokeStyle(Qt.NoPen) # Fill layers have no stroke
+                    qgis_layer = simple_fill
 
-        # 2. Configure the STROKE (Outline)
-        if stroke_def:
-            stroke_color = parse_color(stroke_def.get("color"))
-            stroke_width = stroke_def.get("width", 0.26)
-            if stroke_color:
-                fill_layer.setStrokeColor(stroke_color)
-            fill_layer.setStrokeWidth(stroke_width)
-            fill_layer.setStrokeWidthUnit(QgsUnitTypes.RenderPoints)
-            # The default stroke style is Qt.SolidLine, which is what we want.
-        else:
-            # If no stroke is defined either, explicitly set style to NoPen.
-            fill_layer.setStrokeStyle(Qt.NoPen)
+            elif layer_type == "CIMSolidStroke":
+                # Create a simple fill layer and use it only for the stroke
+                stroke_layer = SymbolFactory._create_solid_stroke_layer(layer_def)
+                if stroke_layer:
+                    simple_stroke = QgsSimpleFillSymbolLayer()
+                    simple_stroke.setStrokeColor(stroke_layer.color())
+                    simple_stroke.setStrokeWidth(stroke_layer.width())
+                    simple_stroke.setStrokeWidthUnit(stroke_layer.widthUnit())
+                    simple_stroke.setPenJoinStyle(stroke_layer.penJoinStyle())
+                    simple_stroke.setBrushStyle(Qt.NoBrush) # Stroke layers have no fill
+                    qgis_layer = simple_stroke
 
-        fill_symbol.appendSymbolLayer(fill_layer)
+            elif layer_type == "CIMHatchFill":
+                # Create a simple fill and map the CIM rotation to a QGIS BrushStyle.
+                hatch_fill = QgsSimpleFillSymbolLayer()
+                rotation = layer_def.get("rotation", 0.0)
+                
+                brush_style = Qt.NoBrush
+                if rotation == 90:
+                    brush_style = Qt.VerPattern      # Vertical |
+                elif rotation == 0 or rotation == 180:
+                    brush_style = Qt.HorPattern      # Horizontal -
+                elif rotation == 45:
+                    brush_style = Qt.FDiagPattern    # Forward Diagonal /
+                elif rotation == 135:
+                    brush_style = Qt.BDiagPattern    # Backward Diagonal \
+                else:
+                    logger.warning(f"Unsupported CIMHatchFill rotation: {rotation}. Defaulting to solid.")
+                    brush_style = Qt.SolidPattern
+
+                hatch_fill.setBrushStyle(brush_style)
+
+                # Get the color for the hash lines from the CIM definition.
+                line_layer_def = layer_def.get("lineSymbol", {}).get("symbolLayers", [{}])[0]
+                if line_layer_def:
+                    color_def = line_layer_def.get("color")
+                    line_color = parse_color(color_def) if color_def else QColor("black")
+                    # For a hash fill, the main color is used for the pattern lines.
+                    hatch_fill.setColor(line_color)
+
+                hatch_fill.setStrokeStyle(Qt.NoPen) # Ensure no border is drawn by this layer.
+                qgis_layer = hatch_fill
+
+            elif layer_type == "CIMPictureFill":
+                qgis_layer = SymbolFactory._create_picture_fill_layer(layer_def)
+
+            else:
+                logger.warning(f"Unsupported fill layer type: {layer_type}")
+
+            if qgis_layer:
+                fill_symbol.appendSymbolLayer(qgis_layer)
+
+        if fill_symbol.symbolLayerCount() == 0:
+            fill_symbol.appendSymbolLayer(SymbolFactory._create_default_fill_layer())
+
         return fill_symbol
+
+    @staticmethod
+    def _create_picture_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsSymbolLayer]:
+        """
+        Creates a QGIS Picture Fill from a CIMPictureFill definition,
+        using the QgsRasterFillSymbolLayer class for compatibility with older QGIS versions.
+        """
+        try:
+            url_string = layer_def.get("url", "")
+            if not url_string.startswith("data:image/bmp;base64,"):
+                logger.warning(f"Unsupported picture fill format: {url_string[:30]}")
+                return None
+
+            # Decode the base64 data
+            base64_data = url_string.split(",")[1]
+            image_data = base64.b64decode(base64_data)
+
+            # Create a temporary file to store the image
+            temp_dir = tempfile.gettempdir()
+            file_path = os.path.join(temp_dir, "temp_arc_symbol.bmp")
+            with open(file_path, "wb") as f:
+                f.write(image_data)
+
+           # Instantiate the raster fill layer by passing the file path directly to the constructor
+            picture_layer = QgsRasterFillSymbolLayer(file_path)
+
+            # Set image size properties from the CIM definition
+            # The 'height' in CIM corresponds to the width in QGIS's raster fill
+            image_width = layer_def.get("height", 32.0) # Default to a visible size
+            picture_layer.setWidth(image_width)
+            picture_layer.setWidthUnit(QgsUnitTypes.RenderPoints)
+            
+            # NOTE: CIM color substitutions are not supported.
+            # The image will be rendered with its original colors.
+
+            return picture_layer
+        except Exception as e:
+            logger.error(f"Failed to create picture fill layer: {e}")
+            return None
     
     @staticmethod
     def _create_solid_stroke_layer(layer_def: Dict[str, Any]) -> Optional[QgsSimpleLineSymbolLayer]:
