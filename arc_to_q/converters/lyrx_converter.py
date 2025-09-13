@@ -225,7 +225,7 @@ def create_gbds_albers_crs():
     """
     # This is a template - you'll need the exact parameters
     # Common Albers Equal Area parameters for US data in feet:
-    proj4_string = '+proj=aea +lat_0=23 +lon_0=-96 +lat_1=29.5 +lat_2=45.5 +x_0=0 +y_0=0 +datum=NAD83 +units=ft +no_defs'
+    proj4_string = '+proj=aea +lat_0=16.5 +lon_0=-92 +lat_1=16.5 +lat_2=34.5 +x_0=0 +y_0=0 +datum=WGS84 +units=ft +no_defs'
     
     custom_crs = QgsCoordinateReferenceSystem()
     success = custom_crs.createFromProj(proj4_string)
@@ -394,41 +394,51 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             print("=== RASTER DEBUGGING INFO ===")
             data_provider = qgis_layer.dataProvider()
             if data_provider:
-                print(f"Raster width: {qgis_layer.width()}")
-                print(f"Raster height: {qgis_layer.height()}")
+                # Basic raster info
+                width = qgis_layer.width()
+                height = qgis_layer.height()
+                print(f"Raster dimensions: {width} x {height} pixels")
                 print(f"Band count: {qgis_layer.bandCount()}")
                 
-                # Get the raster extent
+                # Get the raster extent in the CRS units
                 extent = qgis_layer.extent()
-                print(f"Extent: {extent.toString()}")
+                extent_width = extent.width()
+                extent_height = extent.height()
+                print(f"Extent width: {extent_width:.2f} feet")
+                print(f"Extent height: {extent_height:.2f} feet")
                 
-                # Try to get transform information (method varies by QGIS version)
-                try:
-                    # Try different methods to get geotransform
-                    if hasattr(data_provider, 'geoTransform'):
-                        transform = data_provider.geoTransform()
-                    else:
-                        # Alternative method for older QGIS versions
-                        transform = None
-                        print("Cannot access geotransform directly")
-                        
-                    if transform:
-                        print(f"GeoTransform: {transform}")
-                        print(f"  - Top-left X: {transform[0]}")
-                        print(f"  - Pixel width: {transform[1]}")  
-                        print(f"  - X rotation: {transform[2]}")    # This might be the issue!
-                        print(f"  - Top-left Y: {transform[3]}")
-                        print(f"  - Y rotation: {transform[4]}")    # This might be the issue!
-                        print(f"  - Pixel height: {transform[5]}")
-                        
-                        # Check if there's rotation in the transform
-                        if transform[2] != 0 or transform[4] != 0:
-                            print("*** WARNING: Raster has rotation in its geotransform! ***")
-                            print(f"X rotation: {transform[2]}, Y rotation: {transform[4]}")
-                except Exception as e:
-                    print(f"Could not get geotransform: {e}")
+                # Calculate pixel size
+                pixel_width = extent_width / width
+                pixel_height = extent_height / height
+                print(f"Pixel width: {pixel_width:.2f} feet/pixel")
+                print(f"Pixel height: {pixel_height:.2f} feet/pixel")
                 
-            print("=== END DEBUGGING INFO ===")
+                # Check pixel aspect ratio
+                aspect_ratio = pixel_width / pixel_height
+                print(f"Pixel aspect ratio: {aspect_ratio:.6f}")
+                
+                if abs(aspect_ratio - 1.0) > 0.001:
+                    print(f"*** WARNING: Non-square pixels detected! ***")
+                    print(f"This may cause stretching. Pixel aspect ratio should be close to 1.0")
+                
+                # Calculate overall raster aspect ratio
+                raster_aspect = extent_width / extent_height
+                pixel_grid_aspect = width / height
+                print(f"Geographic aspect ratio (extent): {raster_aspect:.4f}")
+                print(f"Pixel grid aspect ratio: {pixel_grid_aspect:.4f}")
+                
+                # Units and CRS info after setting
+                final_crs = qgis_layer.crs()
+                print(f"Final CRS: {final_crs.authid()} - {final_crs.description()}")
+                print(f"CRS Units: {final_crs.mapUnits()}")
+                
+            print("=== END ENHANCED DEBUGGING INFO ===")
+            
+            # After this, you might want to try forcing square pixels if they're not square:
+            if data_provider and abs(aspect_ratio - 1.0) > 0.001:
+                print("Attempting to fix non-square pixels...")
+                # This is a more advanced fix that might help with stretching
+                # You could resample the raster or adjust the display settings
 
             # Get the symbology info from the colorizer
             colorizer_def = layer_def.get('colorizer', {})
