@@ -27,7 +27,7 @@ from qgis.core import (
     QgsRasterFillSymbolLayer,
 )
 from qgis.PyQt.QtCore import Qt, QPointF
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtGui import QColor, QImage
 
 from arc_to_q.converters.utils import parse_color
 
@@ -486,7 +486,7 @@ class SymbolFactory:
     def _create_picture_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsSymbolLayer]:
         """
         Creates a QGIS Picture Fill from a CIMPictureFill definition,
-        using the QgsRasterFillSymbolLayer class for compatibility with older QGIS versions.
+        processing color substitutions to handle custom colors and transparency.
         """
         try:
             url_string = layer_def.get("url", "")
@@ -498,23 +498,49 @@ class SymbolFactory:
             base64_data = url_string.split(",")[1]
             image_data = base64.b64decode(base64_data)
 
-            # Create a temporary file to store the image
-            temp_dir = tempfile.gettempdir()
-            file_path = os.path.join(temp_dir, "temp_arc_symbol.bmp")
-            with open(file_path, "wb") as f:
-                f.write(image_data)
+            # Load the original image data into a QImage object
+            image = QImage()
+            image.loadFromData(image_data, 'BMP')
 
-           # Instantiate the raster fill layer by passing the file path directly to the constructor
+            # Process color substitutions if they exist
+            substitutions = layer_def.get("colorSubstitutions", [])
+            if substitutions:
+                # Create a mapping from old RGB tuples to new QColor objects
+                color_map = {}
+                for sub in substitutions:
+                    old_color_vals = sub.get("oldColor", {}).get("values")
+                    new_color_def = sub.get("newColor", {})
+                    if old_color_vals and new_color_def:
+                        # Use only RGB for the key, as source is likely 24-bit
+                        old_color_rgb = tuple(old_color_vals[:3])
+                        qgis_new_color = parse_color(new_color_def)
+                        if qgis_new_color:
+                            color_map[old_color_rgb] = qgis_new_color
+                
+                if color_map:
+                    # Convert image to a format that supports an alpha channel for transparency
+                    image = image.convertToFormat(QImage.Format_ARGB32)
+
+                    # Iterate through each pixel and apply the color substitution
+                    for x in range(image.width()):
+                        for y in range(image.height()):
+                            pixel_color = QColor(image.pixel(x, y))
+                            pixel_rgb = (pixel_color.red(), pixel_color.green(), pixel_color.blue())
+                            if pixel_rgb in color_map:
+                                image.setPixelColor(x, y, color_map[pixel_rgb])
+
+            # Save the (potentially modified) image to a temporary PNG file to preserve transparency
+            temp_dir = tempfile.gettempdir()
+            file_path = os.path.join(temp_dir, "temp_arc_symbol.png") # Use PNG for transparency
+            image.save(file_path, "PNG")
+
+            # Instantiate the raster fill layer with the path to our new PNG
             picture_layer = QgsRasterFillSymbolLayer(file_path)
 
             # Set image size properties from the CIM definition
-            # The 'height' in CIM corresponds to the width in QGIS's raster fill
-            image_width = layer_def.get("height", 32.0) # Default to a visible size
+            image_width = layer_def.get("height", 32.0)
             picture_layer.setWidth(image_width)
             picture_layer.setWidthUnit(QgsUnitTypes.RenderPoints)
-            
-            # NOTE: CIM color substitutions are not supported.
-            # The image will be rendered with its original colors.
 
             return picture_layer
         except Exception as e:
