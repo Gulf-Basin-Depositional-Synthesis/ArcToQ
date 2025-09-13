@@ -202,7 +202,7 @@ class SymbolFactory:
             # The color/size info is in a nested symbol definition
             nested_symbol_def = layer_def.get("symbol", {}).get("symbolLayers", [{}])[0]
             color = parse_color(nested_symbol_def.get("color"))
-            size = nested_symbol_def.get("size", 6.0)
+            size = layer_def.get("size", 6.0)
 
             font_layer.setFontFamily(font_family)
             font_layer.setCharacter(character)
@@ -437,8 +437,8 @@ class SymbolFactory:
             width = layer_def.get("width", 0.5)
             
             # Ensure minimum width for visibility, but don't alter intended thin lines too much
-            if width > 0:
-                width = max(width, 0.1)
+            #if width > 0:
+               # width = max(width, 0.1)
             
             if color:
                 line_layer.setColor(color)
