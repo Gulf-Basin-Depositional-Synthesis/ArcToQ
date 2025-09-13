@@ -448,9 +448,9 @@ class SymbolFactory:
                 elif rotation == 0 or rotation == 180:
                     brush_style = Qt.HorPattern      # Horizontal -
                 elif rotation == 45:
-                    brush_style = Qt.FDiagPattern    # Forward Diagonal /
-                elif rotation == 135:
                     brush_style = Qt.BDiagPattern    # Backward Diagonal \
+                elif rotation == 135:
+                    brush_style = Qt.FDiagPattern    # Forward Diagonal /
                 else:
                     logger.warning(f"Unsupported CIMHatchFill rotation: {rotation}. Defaulting to solid.")
                     brush_style = Qt.SolidPattern

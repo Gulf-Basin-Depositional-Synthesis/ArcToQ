@@ -8,12 +8,16 @@ from qgis.core import (
     QgsApplication,
     QgsVectorLayer,
     QgsLayerDefinition,
-    QgsReadWriteContext
+    QgsReadWriteContext,
+    QgsRasterLayer,
+    QgsProject
 )
 
 #from arc_to_q.converters.symbology_converter import set_symbology
 from arc_to_q.converters.vector.vector_renderer import RendererFactory
 from arc_to_q.converters.label_converter import set_labels
+from arc_to_q.converters.raster.color_mapping import create_classified_renderer
+from arc_to_q.converters.raster.resampling import get_resampling_method
 
 
 def _open_lyrx(lyrx):
@@ -238,6 +242,49 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         layer_def = next((ld for ld in lyrx.get("layerDefinitions", []) if ld.get("uRI") == layer_uri), {})
         if layer_def.get("type") == "CIMFeatureLayer":
             out_layer = _convert_feature_layer(in_folder, layer_def, out_file)
+        elif layer_def.get("type") == 'CIMRasterLayer':
+            print(f"Processing Raster Layer: {layer_def.get('name')}")
+            
+            # 1. Construct the path to the raster file
+            data_connection = layer_def.get('dataConnection', {})
+            workspace = data_connection.get('workspaceConnectionString', '').replace('DATABASE=', '')
+            dataset = data_connection.get('dataset', '')
+            
+            if not workspace or not dataset:
+                print(f"Could not determine raster path for {layer_def.get('name')}")
+                return
+                
+            raster_path = os.path.join(workspace, dataset)
+            layer_name = layer_def.get('name', os.path.basename(raster_path))
+
+            # 2. Create the QGIS raster layer object
+            qgis_layer = QgsRasterLayer(raster_path, layer_name)
+            if not qgis_layer.isValid():
+                print(f"Failed to load raster layer: {raster_path}")
+                return
+
+            # 3. Get the symbology info from the colorizer
+            colorizer_def = layer_def.get('colorizer', {})
+            if colorizer_def:
+                # Check if the colorizer is the classified type we support
+                if colorizer_def.get('type') == 'CIMRasterClassifyColorizer':
+                    # Call the function from color_mapping.py to create the renderer
+                    renderer = create_classified_renderer(qgis_layer, colorizer_def)
+                    if renderer:
+                        # Apply the renderer to the layer
+                        qgis_layer.setRenderer(renderer)
+                
+                # 4. Set resampling method on the raster layer's data provider
+                resampling = get_resampling_method(colorizer_def)
+                data_provider = qgis_layer.dataProvider()
+                if data_provider:
+                    # Set resampling for zoomed in (overview) display
+                    data_provider.setZoomedInResamplingMethod(resampling)
+                    # Set resampling for zoomed out (overview) display  
+                    data_provider.setZoomedOutResamplingMethod(resampling)
+            
+            # 5. Set this as the out_layer for further processing
+            out_layer = qgis_layer
         else:
             raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
 
