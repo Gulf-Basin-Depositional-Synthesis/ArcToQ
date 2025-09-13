@@ -21,7 +21,7 @@ from qgis.core import (
     QgsFontMarkerSymbolLayer,
     QgsMarkerLineSymbolLayer,
 )
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QPointF
 from qgis.PyQt.QtGui import QColor
 
 from arc_to_q.converters.utils import parse_color
@@ -265,11 +265,12 @@ class SymbolFactory:
         if not placement:
             return
 
-        use_map_units = layer_def.get("scaleSymbolsProportionally", False) or layer_def.get("respectFrame", False)
-        qgis_unit = QgsUnitTypes.RenderMapUnits if use_map_units else QgsUnitTypes.RenderPoints
-        
         if placement.get("angleToLine", False):
             marker_line_layer.setRotateMarker(True)
+
+        if placement.get("placePerPart", False):
+        # This handles rendering on each part of a multipart line feature.
+            marker_line_layer.setPlaceOnEveryPart(True)
 
     @staticmethod
     def _create_character_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMarkerLineSymbolLayer]:
@@ -302,7 +303,22 @@ class SymbolFactory:
         """Creates marker line layers for a given sub-symbol based on placement rules."""
         placement = layer_def.get("markerPlacement", {})
         placement_type = placement.get("type", "")
-        
+
+        if "AlongLineSameSize" in placement_type:
+            # For repeating markers that need their base on the line,
+            symbol_layer = sub_symbol.symbolLayer(0)
+            if symbol_layer and "offset" in placement:
+                size = layer_def.get("size", 6.0)
+                offset_y = -size/1.4
+                symbol_layer.setOffset(QPointF(0, offset_y))
+                symbol_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
+
+            elif symbol_layer:
+                size = layer_def.get("size", 6.0)
+                offset_y = -size*0.15
+                symbol_layer.setOffset(QPointF(0, offset_y))
+                symbol_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
+
         qgis_layers = []
 
         if "AtRatioPositions" in placement_type:
@@ -355,17 +371,17 @@ class SymbolFactory:
             template = placement.get("placementTemplate", [10])
             interval = template[0] if template else 10
             marker_layer.setInterval(interval)
-            marker_layer.setIntervalUnit(qgis_unit)
+            marker_layer.setIntervalUnit(QgsUnitTypes.RenderPoints)
             
             offset = placement.get("offset", 0)
             if offset != 0:
                 marker_layer.setOffset(offset)
-                marker_layer.setOffsetUnit(qgis_unit)
+                marker_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
             
-            offset_along = placement.get("offsetAlongLine", 0)
+            '''offset_along = placement.get("offsetAlongLine", 0)
             if offset_along != 0:
                 marker_layer.setOffsetAlongLine(offset_along)
-                marker_layer.setOffsetAlongLineUnit(qgis_unit)
+                marker_layer.setOffsetAlongLineUnit(qgis_unit)'''
                 
             qgis_layers.append(marker_layer)
         
