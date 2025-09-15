@@ -12,11 +12,16 @@ from qgis.core import (
     QgsReadWriteContext,
     QgsSingleSymbolRenderer,
     QgsSymbol,
+    QgsPalLayerSettings,
+    QgsVectorLayerSimpleLabeling,
+    QgsTextFormat,
+    QgsUnitTypes
 )
+from PyQt5.QtGui import QColor
 
 from arc_to_q.converters.vector.vector_renderer import RendererFactory
 from arc_to_q.converters.label_converter import set_labels
-from arc_to_q.converters.annotation_converter import set_annotation_labels
+from arc_to_q.converters.annotation_converter import *
 from arc_to_q.converters.raster.raster_renderer import *
 from arc_to_q.converters.custom_crs_registry import CUSTOM_CRS_DEFINITIONS, save_custom_crs_to_database
 
@@ -257,6 +262,8 @@ def _convert_annotation_layer(in_folder, layer_def, out_file):
     layer_name = layer_def['name']
     f_table = layer_def["featureTable"]
     
+    print(f"Converting annotation layer: {layer_name}")
+    
     # 1. Load the annotation feature class as a standard vector layer
     abs_uri, rel_uri = _parse_source(in_folder, f_table["dataConnection"], out_file)
     layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
@@ -264,25 +271,78 @@ def _convert_annotation_layer(in_folder, layer_def, out_file):
     if not layer.isValid():
         raise RuntimeError(f"Annotation layer failed to load: {layer_name} | Source: {abs_uri}")
     
-    # 2. Create a transparent symbol
+    print(f"Loaded annotation layer with {layer.featureCount()} features")
+    print(f"Layer CRS: {layer.crs().authid()}")
+    print(f"Available fields: {[field.name() for field in layer.fields()]}")
+    
+    # 2. Create a transparent symbol for the polygon geometry
     symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-    symbol.setOpacity(0)
+    symbol.setOpacity(0)  # Make completely transparent
     
     # 3. Create a renderer with the transparent symbol
     renderer = QgsSingleSymbolRenderer(symbol)
     layer.setRenderer(renderer)
 
-    # 4. Apply data-defined labeling settings
-    set_annotation_labels(layer)
+    # 4. Apply the enhanced annotation labeling system
+    print("Applying annotation conversion...")
+    
+    # Force enable labeling first
+    layer.setLabelsEnabled(True)
+    
+    # Try the robust annotation converter
+    success = apply_enhanced_annotation_converter(layer)
+    
+    if not success:
+        print(f"WARNING: Enhanced annotation conversion failed for layer {layer_name}")
+        print("Applying fallback basic labeling...")
+        
+        # Fallback to basic labeling
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "TextString"
+        settings.isExpression = False
+        
+        # Use screen units as fallback to ensure visibility
+        text_format = QgsTextFormat()
+        text_format.setSize(12)
+        text_format.setSizeUnit(QgsUnitTypes.RenderPoints)
+        text_format.setColor(QColor('black'))  # Use black instead of red
+        text_format.setAllowHtmlFormatting(True)
+        
+        settings.setFormat(text_format)
+        
+        # Configure placement and visibility
+        settings.placement = QgsPalLayerSettings.AroundPoint
+        settings.priority = 10
+        
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+        
+        print(f"Applied fallback labeling to {layer_name}")
+    else:
+        print(f"Successfully applied enhanced annotation conversion to {layer_name}")
 
-    # 5. Set display field, definition query, and relative path
+    # 5. Set display field and definition query
     _set_display_field(layer, layer_def)
+    
+    # Switch to relative path
+    print("Switching to relative path...")
     layer.setDataSource(rel_uri, layer.name(), layer.providerType())
     _set_definition_query(layer, layer_def)
 
+    # Final validation
     if not layer.isValid():
         raise RuntimeError(f"Annotation layer became invalid after setting relative path or query: {layer_name}")
 
+    # Debug final state
+    print(f"Final layer state - Labels enabled: {layer.labelsEnabled()}")
+    if layer.labeling():
+        labeling_settings = layer.labeling().settings()
+        print(f"Labeling field: {labeling_settings.fieldName}")
+        print(f"Font size unit: {labeling_settings.format().sizeUnit()}")
+        print(f"Font size: {labeling_settings.format().size()}")
+    else:
+        print("WARNING: No labeling object found on layer!")
+    
     return layer
 
 def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
