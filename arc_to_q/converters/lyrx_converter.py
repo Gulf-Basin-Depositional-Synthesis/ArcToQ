@@ -10,12 +10,13 @@ from qgis.core import (
     QgsVectorLayer,
     QgsLayerDefinition,
     QgsReadWriteContext,
-    QgsRasterLayer,
-    QgsCoordinateReferenceSystem,
+    QgsSingleSymbolRenderer,
+    QgsSymbol,
 )
 
 from arc_to_q.converters.vector.vector_renderer import RendererFactory
 from arc_to_q.converters.label_converter import set_labels
+from arc_to_q.converters.annotation_converter import set_annotation_labels
 from arc_to_q.converters.raster.raster_renderer import *
 from arc_to_q.converters.custom_crs_registry import CUSTOM_CRS_DEFINITIONS, save_custom_crs_to_database
 
@@ -248,6 +249,42 @@ def _convert_raster_layer(in_folder, layer_def, out_file):
     
     return qgis_layer
 
+def _convert_annotation_layer(in_folder, layer_def, out_file):
+    """
+    Converts a CIMAnnotationLayer to a QgsVectorLayer with data-defined labeling
+    and a transparent renderer for the feature geometry.
+    """
+    layer_name = layer_def['name']
+    f_table = layer_def["featureTable"]
+    
+    # 1. Load the annotation feature class as a standard vector layer
+    abs_uri, rel_uri = _parse_source(in_folder, f_table["dataConnection"], out_file)
+    layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
+
+    if not layer.isValid():
+        raise RuntimeError(f"Annotation layer failed to load: {layer_name} | Source: {abs_uri}")
+    
+    # 2. Create a transparent symbol
+    symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+    symbol.setOpacity(0)
+    
+    # 3. Create a renderer with the transparent symbol
+    renderer = QgsSingleSymbolRenderer(symbol)
+    layer.setRenderer(renderer)
+
+    # 4. Apply data-defined labeling settings
+    set_annotation_labels(layer)
+
+    # 5. Set display field, definition query, and relative path
+    _set_display_field(layer, layer_def)
+    layer.setDataSource(rel_uri, layer.name(), layer.providerType())
+    _set_definition_query(layer, layer_def)
+
+    if not layer.isValid():
+        raise RuntimeError(f"Annotation layer became invalid after setting relative path or query: {layer_name}")
+
+    return layer
+
 def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
     """Convert an ArcGIS Pro .lyrx file to a QGIS .qlr file
 
@@ -277,6 +314,8 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             out_layer = _convert_feature_layer(in_folder, layer_def, out_file)
         elif layer_def.get("type") == 'CIMRasterLayer':
             out_layer = _convert_raster_layer(in_folder, layer_def, out_file)
+        elif layer_def.get("type") == 'CIMAnnotationLayer':
+            out_layer = _convert_annotation_layer(in_folder, layer_def, out_file)
         else:
             raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
 
