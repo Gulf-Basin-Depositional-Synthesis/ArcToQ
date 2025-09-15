@@ -48,9 +48,17 @@ def parse_raster_source(in_folder, data_connection, out_file):
         abs_uri = abs_path.as_posix()
         
         # Build relative URI for saving in QLR
-        out_dir = Path(out_file).parent.resolve()
-        rel_path = Path(os.path.relpath(abs_path, start=out_dir))
-        rel_uri = rel_path.as_posix()
+        # Try to build a relative path, but fall back to absolute if on different drives.
+        try:
+            out_dir = Path(out_file).parent.resolve()
+            rel_path = Path(os.path.relpath(abs_path, start=out_dir))
+            rel_uri = rel_path.as_posix()
+            print(f"Successfully created relative path for raster: {rel_uri}")
+        except ValueError:
+            # This error occurs when paths are on different drives.
+            print("Warning: Input raster and output folder are on different drives.")
+            print("Falling back to using an absolute path in the QGIS layer file.")
+            rel_uri = abs_uri # Fallback to the absolute path
         
         return abs_uri, rel_uri
     else:

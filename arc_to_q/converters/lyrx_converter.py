@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import urllib.parse
 
 from qgis.core import (
     QgsApplication,
@@ -15,14 +16,8 @@ from qgis.core import (
 
 from arc_to_q.converters.vector.vector_renderer import RendererFactory
 from arc_to_q.converters.label_converter import set_labels
-from arc_to_q.converters.raster.raster_renderer import (
-    parse_raster_source,
-    create_raster_layer,
-    apply_raster_symbology,
-    print_raster_debug_info,
-    switch_to_relative_path
-)
-from arc_to_q.converters.coordinate_converter import process_layer_crs
+from arc_to_q.converters.raster.raster_renderer import *
+from arc_to_q.converters.custom_crs_registry import CUSTOM_CRS_DEFINITIONS, save_custom_crs_to_database
 
 
 def _open_lyrx(lyrx):
@@ -69,9 +64,17 @@ def _parse_source(in_folder, data_connection, out_file):
     abs_uri = f"{abs_path.as_posix()}|layername={dataset}" if factory == "FileGDB" else abs_path.as_posix()
 
     # Build relative URI for saving in QLR
-    out_dir = Path(out_file).parent.resolve()
-    rel_path = Path(os.path.relpath(abs_path, start=out_dir))
-    rel_uri = f"{rel_path.as_posix()}|layername={dataset}" if factory == "FileGDB" else rel_path.as_posix()
+    # Try to build a relative path, but fall back to absolute if they are on different drives.
+    try:
+        out_dir = Path(out_file).parent.resolve()
+        rel_path = Path(os.path.relpath(abs_path, start=out_dir))
+        rel_uri = f"{rel_path.as_posix()}|layername={dataset}" if factory == "FileGDB" else rel_path.as_posix()
+        print(f"Successfully created relative path: {rel_uri}")
+    except ValueError:
+        # This error occurs when paths are on different drives.
+        print("Warning: Input data and output folder are on different drives.")
+        print("Falling back to using an absolute path in the QGIS layer file.")
+        rel_uri = abs_uri # Fallback to the absolute path
 
     # Build QGIS source string
     if factory in ["FileGDB", "Raster", "Shapefile"]:
@@ -217,41 +220,30 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     return layer
 
 def _convert_raster_layer(in_folder, layer_def, out_file):
-    """Convert a raster layer from ArcGIS LYRX to QGIS.
-    
-    Args:
-        in_folder (str): Path to the folder containing the input LYRX file.
-        layer_def (dict): The layer definition dictionary from the LYRX file.
-        out_file (str): Path for the output QLR file.
-        
-    Returns:
-        QgsRasterLayer: The converted QGIS raster layer.
+    """
+    Final version: Converts a raster layer by first ensuring its custom CRS
+    is registered in the QGIS user database.
     """
     print(f"Processing Raster Layer: {layer_def.get('name')}")
     
-    # Parse the raster data source
+    # Step 1: Check for and register any necessary custom CRS
+    arcgis_crs_name = layer_def.get('spatialReference', {}).get('name')
+    if arcgis_crs_name in CUSTOM_CRS_DEFINITIONS:
+        proj_string = CUSTOM_CRS_DEFINITIONS[arcgis_crs_name]
+        # This is the new, critical step:
+        save_custom_crs_to_database(arcgis_crs_name, proj_string)
+
+    # Step 2: Parse source and load the layer normally
     data_connection = layer_def.get('dataConnection', {})
-    try:
-        abs_uri, rel_uri = parse_raster_source(in_folder, data_connection, out_file)
-    except Exception as e:
-        print(f"Error parsing raster source: {e}")
-        raise
-    
-    # Create the raster layer
+    abs_uri, rel_uri = parse_raster_source(in_folder, data_connection, out_file)
     layer_name = layer_def.get('name', os.path.basename(abs_uri))
+    
+    # QGIS will now recognize the CRS name when it loads the layer
     qgis_layer = create_raster_layer(abs_uri, layer_name)
-    
-    # Process coordinate reference system
-    if not process_layer_crs(qgis_layer, layer_def):
-        print("Warning: CRS processing may not have been completely successful")
-    
-    # Print debugging information
+
+    # Step 3: Apply symbology and switch to a relative path
     print_raster_debug_info(qgis_layer)
-    
-    # Apply symbology and rendering settings
     apply_raster_symbology(qgis_layer, layer_def)
-    
-    # Switch to relative path
     switch_to_relative_path(qgis_layer, rel_uri)
     
     return qgis_layer
