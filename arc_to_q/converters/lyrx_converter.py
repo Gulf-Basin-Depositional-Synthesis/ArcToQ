@@ -69,7 +69,7 @@ def _parse_source(in_folder, data_connection, out_file):
         out_dir = Path(out_file).parent.resolve()
         rel_path = Path(os.path.relpath(abs_path, start=out_dir))
         rel_uri = f"{rel_path.as_posix()}|layername={dataset}" if factory == "FileGDB" else rel_path.as_posix()
-        print(f"Successfully created relative path: {rel_uri}")
+        #print(f"Successfully created relative path: {rel_uri}")
     except ValueError:
         # This error occurs when paths are on different drives.
         print("Warning: Input data and output folder are on different drives.")
