@@ -28,8 +28,57 @@ def _open_lyrx(lyrx):
     return data
 
 
-def _make_uris(in_folder, conn_str, factory, dataset, out_file):
-    """Helper to build absolute and relative URIs for a dataset."""
+def _parse_definition_query(layer_def: dict):
+    """
+    Parses the definition query (or "subset string") into a valid one for a QGIS layer.
+
+    Example ArcGIS Pro queries from the LYRX JSON:
+        "Unit_Id" = 22
+        "WellData_UnitThk" <> -9999 AND "WellData_Unit_Id" = 22
+
+    Example QGIS equivalents (including pipe delimiter for source URI):
+        |subset=Unit_Id = 22
+        |subset="WellData_UnitThk" != -9999 AND "WellData_Unit_Id" = 22
+
+    Args:
+        layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
+
+    Returns:
+        str: The QGIS-compatible definition query string, or an empty string if none,
+             including the leading "|subset=" part.
+    """
+    feature_table = layer_def.get("featureTable", {})
+    definition_query = feature_table.get("definitionExpression", "").strip()
+
+    if definition_query:
+        # Replace ArcGIS-style operators with QGIS-compatible ones
+        # ArcGIS uses '<>' for 'not equal', QGIS uses '!='
+        qgis_query = definition_query.replace("<>", "!=")
+
+        # Optionally, handle other syntax differences here if needed
+
+        # Return the query string with the pipe delimiter for QGIS
+        return f"|subset={qgis_query}"
+    return ""
+
+
+def _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file):
+    """Helper to build absolute and relative URIs for a dataset.
+    
+    Args:
+        in_folder (str): Path to the folder containing the .lyrx file.
+        conn_str (str): The workspace connection string from the .lyrx file.
+        factory (str): The workspace factory type (e.g. "FileGDB", "Shapefile").
+        dataset (str): The dataset name (e.g. feature class or table name).
+        def_query (str): The definition query string to append to the URI (or empty string).
+            The query should already be in QGIS-compatible format, including the leading "|subset=".
+        out_file (str): Path to the converted QGIS .qlr file.
+
+    Returns:
+        tuple: (abs_uri, rel_uri)
+          - abs_uri: Absolute QGIS URI for the dataset
+          - rel_uri: Relative QGIS URI for the dataset
+    """
     if "=" in conn_str:
         _, raw_path = conn_str.split("=", 1)
     else:
@@ -52,10 +101,13 @@ def _make_uris(in_folder, conn_str, factory, dataset, out_file):
     else:
         rel_uri = rel_path.as_posix()
 
+    if def_query:
+        abs_uri += def_query
+        rel_uri += def_query
     return abs_uri, rel_uri
 
 
-def _parse_source(in_folder, data_connection, out_file):
+def _parse_source(in_folder, data_connection, def_query, out_file):
     """Build both absolute and relative QGIS-friendly URIs for a dataset.
     
     Handles both direct feature class connections and joined tables.
@@ -63,6 +115,8 @@ def _parse_source(in_folder, data_connection, out_file):
     Args:
         in_folder (str): Path to the folder containing the .lyrx file.
         data_connection (dict): The data connection info from the .lyrx file.
+        def_query (str): The definition query string to append to the URI (or empty string).
+            The query should already be in QGIS-compatible format, including the leading "|subset=".
         out_file (str): Path to the converted QGIS .qlr file.
 
     Returns:
@@ -77,16 +131,19 @@ def _parse_source(in_folder, data_connection, out_file):
 
     # --- Handle direct connections (FileGDB, Shapefile, Raster) ---
     if factory and conn_str and dataset:
-        return _make_uris(in_folder, conn_str, factory, dataset, out_file), None
+        return _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file), None
 
     # --- Handle table join (CIMRelQueryTableDataConnection) ---
     if data_connection.get("type") == "CIMRelQueryTableDataConnection":
+        if def_query:
+            raise NotImplementedError("Definition queries on joined layers are not yet supported.")
+
         source = data_connection.get("sourceTable", {})
         dest = data_connection.get("destinationTable", {})
 
         # Build URIs for source (feature class) and destination (table)
-        (abs_uri, rel_uri), _ = _parse_source(in_folder, source, out_file)
-        (abs_table_uri, rel_table_uri), _ = _parse_source(in_folder, dest, out_file)
+        (abs_uri, rel_uri), _ = _parse_source(in_folder, source, "", out_file)
+        (abs_table_uri, rel_table_uri), _ = _parse_source(in_folder, dest, "", out_file)
 
         join_info = {
             "primaryKey": data_connection.get("primaryKey"),
@@ -178,7 +235,8 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
         raise Exception(f"Unexpected feature table type: {f_table['type']}")
 
     # Parse source: returns (abs_uri, rel_uri), join_info
-    (abs_uri, rel_uri), join_info = _parse_source(in_folder, f_table["dataConnection"], out_file)
+    def_query = _parse_definition_query(layer_def)
+    (abs_uri, rel_uri), join_info = _parse_source(in_folder, f_table["dataConnection"], def_query, out_file)
 
     # Apply join if present
     if join_info:
@@ -216,7 +274,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     # Set other layer properties
     _set_display_field(layer, layer_def)
     set_symbology(layer, layer_def)
-    set_labels(layer, layer_def)
+    # set_labels(layer, layer_def)
 
     return layer
 
@@ -279,5 +337,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error converting LYRX: {e}")
     finally:
-        if manage_qgs:
-            qgs.exitQgis()
+        qgs.exitQgis()
