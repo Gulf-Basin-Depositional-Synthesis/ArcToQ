@@ -209,6 +209,28 @@ def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
     color = _color_from_symbol_layers(text_symbol["symbol"]["symbolLayers"])
     text_format.setColor(color)
 
+
+    # --- Halo ---
+    def _get_halo_size():
+        hs = text_symbol.get("haloSize", None)
+        try:
+            return float(hs) if hs is not None else None
+        except Exception:
+            return None
+
+    halo_size = _get_halo_size()
+    halo_symbol = text_symbol.get("haloSymbol", None)
+    halo_layers = halo_symbol.get("symbolLayers", []) if halo_symbol else []
+    halo_present = (halo_layers) and (halo_size is not None and halo_size > 0)
+
+    if halo_present:
+        buffer_settings = QgsTextBufferSettings()
+        buffer_settings.setEnabled(True)
+        halo_color = _color_from_symbol_layers(halo_layers)
+        buffer_settings.setColor(halo_color)
+        buffer_settings.setSize(halo_size)
+        text_format.setBuffer(buffer_settings)
+
     # --- Label Settings ---
     labeling = QgsPalLayerSettings()
     labeling.fieldName = expression

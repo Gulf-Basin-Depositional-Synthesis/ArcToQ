@@ -23,8 +23,8 @@ if __name__ == "__main__":
     depo_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\10_PS\Well Depofacies.lyrx'
 
     layers = [
-        well_lyrx,
-        r'D:\GBDS\Map_Layers\GBDS Well field vis alias.lyrx',
+        # well_lyrx,
+        r'D:\GBDS\Map_Layers\labels with masks.lyrx',
         # salt_lyrx,
         # depo_lyrx,
         # anticline_lyrx,

@@ -325,7 +325,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     _set_display_field(layer, layer_def)
     set_symbology(layer, layer_def)
     _set_field_aliases_and_visibility(layer, layer_def)
-    # set_labels(layer, layer_def)
+    set_labels(layer, layer_def)
 
     return layer
 
