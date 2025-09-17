@@ -442,129 +442,113 @@ def convert_arcgis_annotations(layer: QgsVectorLayer, **kwargs) -> bool:
 
 def create_robust_annotation_labeling(layer: QgsVectorLayer) -> bool:
     """
-    Create robust annotation labeling that works with different QGIS versions
+    Create robust annotation labeling with FIXED rotation, scaling, and positioning
     """
     try:
-        # Step 1: Create base label settings
         settings = QgsPalLayerSettings()
         settings.fieldName = "TextString"
         settings.isExpression = False
         
-        # Step 2: Configure text format
         text_format = QgsTextFormat()
         text_format.setFont(QFont("Arial", 12))
         text_format.setColor(QColor('black'))
         text_format.setAllowHtmlFormatting(True)
         
-        # Step 3: Handle CRS-specific sizing
         crs_authid = layer.crs().authid()
         if "4326" in crs_authid:
-            # Geographic CRS - larger base size for fixed geographic scaling
             text_format.setSize(0.01)
             text_format.setSizeUnit(QgsUnitTypes.RenderMapUnits)
-            print(f"Using geographic coordinate scaling for {crs_authid}")
         else:
-            # Projected CRS
             text_format.setSize(100)
             text_format.setSizeUnit(QgsUnitTypes.RenderMapUnits)
-            print(f"Using projected coordinate scaling for {crs_authid}")
         
         settings.setFormat(text_format)
-        
-        # Step 4: Configure placement
         settings.placement = QgsPalLayerSettings.AroundPoint
         settings.priority = 10
         
-        # Step 5: Add data-defined properties
         field_names = [field.name() for field in layer.fields()]
         properties = QgsPropertyCollection()
         
-       # FIXED Font size - much larger multiplier for visibility
+        # FIXED: Font size with much larger scaling for symbols
         if "FontSize" in field_names:
             if "4326" in crs_authid:
-                # Geographic - much larger multiplier for visibility
-                size_expr = '"FontSize" * 0.04'  # 100x larger than before
+                size_expr = '''
+                CASE 
+                    WHEN "FontName" LIKE '%ESRI%' THEN "FontSize" * 1.0
+                    ELSE "FontSize" * 0.04
+                END
+                '''
             else:
-                # Projected - fixed size conversion
-                size_expr = '"FontSize" * 10'
-            
-            try:
-                properties.setProperty(QgsPalLayerSettings.Property.Size, 
-                                     QgsProperty.fromExpression(size_expr))
-                print("Applied font size data-defined property")
-            except Exception as e:
-                print(f"Could not set font size property: {e}")
+                size_expr = '''
+                CASE 
+                    WHEN "FontName" LIKE '%ESRI%' THEN "FontSize" * 100
+                    ELSE "FontSize" * 10
+                END
+                '''
+                    
+            properties.setProperty(QgsPalLayerSettings.Size, 
+                                QgsProperty.fromExpression(size_expr))
+
         
-        # Font family
+        # Font family (keep existing)
         if "FontName" in field_names:
-            try:
-                # Create expression to map ESRI fonts to available fonts
-                font_expr = '''
-                CASE 
-                    WHEN "FontName" LIKE '%ESRI%' THEN 'Arial'
-                    WHEN "FontName" = 'ESRI AMFM Water' THEN 'Arial'
-                    WHEN "FontName" = 'ESRI Hazardous Materials' THEN 'Arial'
-                    ELSE "FontName"
-                END
-                '''
-                properties.setProperty(QgsPalLayerSettings.Property.Family, 
-                                    QgsProperty.fromExpression(font_expr))
-                print("Applied font family mapping")
-            except Exception as e:
-                print(f"Could not set font family property: {e}")
-                
-        # FIXED Rotation - flipped direction
+            font_expr = '''
+            CASE 
+                WHEN "FontName" LIKE '%ESRI%' THEN 'Arial'
+                WHEN "FontName" = 'ESRI AMFM Water' THEN 'Arial'
+                WHEN "FontName" = 'ESRI Hazardous Materials' THEN 'Arial'
+                ELSE "FontName"
+            END
+            '''
+            properties.setProperty(QgsPalLayerSettings.Family, 
+                                QgsProperty.fromExpression(font_expr))
+        
+        # FIXED: Rotation - use direct ArcGIS angles (no conversion needed)
         if "Angle" in field_names:
-            try:
-                # Flipped direction - removed negative sign
-                rotation_expr = '"Angle"'
-                properties.setProperty(QgsPalLayerSettings.Property.LabelRotation, 
-                                     QgsProperty.fromExpression(rotation_expr))
-                print("Applied corrected rotation data-defined property")
-            except Exception as e:
-                print(f"Could not set rotation property: {e}")
+            rotation_expr = '''
+            CASE 
+                WHEN "FontName" LIKE '%ESRI%' THEN "Angle" + 90
+                ELSE -"Angle"
+            END
+            '''
+            properties.setProperty(QgsPalLayerSettings.LabelRotation, 
+                                QgsProperty.fromExpression(rotation_expr))
         
-        # Positioning offsets
+        # FIXED: Positioning offsets with better scaling
         if "XOffset" in field_names and "YOffset" in field_names:
-            try:
+            if "4326" in crs_authid:
+                offset_expr = 'array("XOffset" * 0.00001, "YOffset" * 0.00001)'
+            else:
                 offset_expr = 'array("XOffset", "YOffset")'
-                properties.setProperty(QgsPalLayerSettings.Property.OffsetXY, 
-                                     QgsProperty.fromExpression(offset_expr))
-                print("Applied offset data-defined property")
-            except Exception as e:
-                print(f"Could not set offset property: {e}")
+            
+            properties.setProperty(QgsPalLayerSettings.OffsetXY, 
+                                 QgsProperty.fromExpression(offset_expr))
+            print("Applied scaled offset positioning")
         
-        # Font styling
+        # Font styling (keep existing)
         if "Bold" in field_names and "Italic" in field_names:
-            try:
-                style_expr = '''
-                CASE 
-                    WHEN "Bold" > 0 AND "Italic" > 0 THEN 'Bold Italic'
-                    WHEN "Bold" > 0 THEN 'Bold'
-                    WHEN "Italic" > 0 THEN 'Italic'
-                    ELSE 'Normal'
-                END
-                '''
-                properties.setProperty(QgsPalLayerSettings.Property.FontStyle, 
-                                     QgsProperty.fromExpression(style_expr))
-                print("Applied font style data-defined property")
-            except Exception as e:
-                print(f"Could not set font style property: {e}")
+            style_expr = '''
+            CASE 
+                WHEN "Bold" > 0 AND "Italic" > 0 THEN 'Bold Italic'
+                WHEN "Bold" > 0 THEN 'Bold'
+                WHEN "Italic" > 0 THEN 'Italic'
+                ELSE 'Normal'
+            END
+            '''
+            properties.setProperty(QgsPalLayerSettings.FontStyle, 
+                                 QgsProperty.fromExpression(style_expr))
         
-        # Apply properties to settings
         if properties.count() > 0:
             settings.setDataDefinedProperties(properties)
             print(f"Applied {properties.count()} data-defined properties")
         
-        # Step 6: Apply to layer
         layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
         layer.setLabelsEnabled(True)
         
-        print(f"Successfully applied robust annotation labeling")
         return True
         
     except Exception as e:
-        print(f"Error in robust annotation conversion: {e}")
+        print(f"Error in annotation conversion: {e}")
         return False
 
 def apply_enhanced_annotation_converter(layer: QgsVectorLayer) -> bool:
