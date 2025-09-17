@@ -19,6 +19,7 @@ from qgis.core import (
     QgsSimpleMarkerSymbolLayer,
     QgsSimpleLineSymbolLayer,
     QgsSimpleFillSymbolLayer,
+    QgsPointPatternFillSymbolLayer,
     QgsSymbolLayer,
     QgsUnitTypes,
     QgsFontMarkerSymbolLayer,
@@ -205,8 +206,16 @@ class SymbolFactory:
             character = chr(character_code)
 
             # The color/size info is in a nested symbol definition
-            nested_symbol_def = layer_def.get("symbol", {}).get("symbolLayers", [{}])[0]
-            color = parse_color(nested_symbol_def.get("color"))
+            color = QColor("black") # Default color
+            nested_symbol_def = layer_def.get("symbol", {})
+            if nested_symbol_def:
+                symbol_layers = nested_symbol_def.get("symbolLayers", [])
+                # Find the solid fill layer which defines the character's color
+                fill_layer_def = next((l for l in symbol_layers if l.get("type") == "CIMSolidFill"), None)
+                if fill_layer_def and "color" in fill_layer_def:
+                    parsed_color = parse_color(fill_layer_def["color"])
+                    if parsed_color:
+                        color = parsed_color
             size = layer_def.get("size", 6.0)
 
             font_layer.setFontFamily(font_family)
@@ -436,6 +445,38 @@ class SymbolFactory:
                     simple_stroke.setPenJoinStyle(stroke_layer.penJoinStyle())
                     simple_stroke.setBrushStyle(Qt.NoBrush) # Stroke layers have no fill
                     qgis_layer = simple_stroke
+            
+            elif layer_type == "CIMCharacterMarker":
+                try:
+                    # 1. Create the font marker with the correct color logic
+                    font_marker_layer = SymbolFactory._create_font_marker_from_character(layer_def)
+                    if not font_marker_layer:
+                        continue
+
+                    # 2. Create a marker symbol to hold the font marker layer
+                    sub_symbol = QgsMarkerSymbol([font_marker_layer])
+
+                    # 3. Create the point pattern fill layer
+                    point_pattern_layer = QgsPointPatternFillSymbolLayer()
+                    point_pattern_layer.setSubSymbol(sub_symbol)
+
+                    # 4. Get placement properties to set the pattern spacing
+                    placement = layer_def.get("markerPlacement", {})
+                    step_x = placement.get("stepX", 5.0)
+                    step_y = placement.get("stepY", 5.0)
+
+                    point_pattern_layer.setDistanceX(step_x)
+                    point_pattern_layer.setDistanceY(step_y)
+
+                    # --- API FIX FOR QGIS 3.4 ---
+                    # Use setDistanceXUnit and setDistanceYUnit instead of setDistanceUnit
+                    point_pattern_layer.setDistanceXUnit(QgsUnitTypes.RenderPoints)
+                    point_pattern_layer.setDistanceYUnit(QgsUnitTypes.RenderPoints)
+                    # --- END OF API FIX ---
+
+                    qgis_layer = point_pattern_layer
+                except Exception as e:
+                    logger.error(f"Failed to create point pattern fill layer: {e}")
 
             elif layer_type == "CIMHatchFill":
                 # Create a simple fill and map the CIM rotation to a QGIS BrushStyle.
