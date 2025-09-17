@@ -19,16 +19,18 @@ if __name__ == "__main__":
     output_folder = r'D:\GBDS\Map_Layers_QGIS'
     ithk_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\22_UM\Well Interval Thickness.lyrx'
     well_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
-    topo_lyrx = r'D:\GBDS\Map_Layers\Basemap\Topography and Bathmetry Contours.lyrx'  # [Feet]+ " ft (" + [Meters] + " m)"
     plss_lyrx = r'D:\GBDS\Map_Layers\Basemap\Public Land Survey System.lyrx'
-    cnt_lyrx = r'D:\GBDS\Map_Layers\contour with expr.lyrx'
-
+    depo_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\10_PS\Well Depofacies.lyrx'
 
     layers = [
-        cnt_lyrx,
         well_lyrx,
-        plss_lyrx,
-        ithk_lyrx,
+        r'D:\GBDS\Map_Layers\GBDS Well field vis alias.lyrx',
+        # salt_lyrx,
+        # depo_lyrx,
+        # anticline_lyrx,
+        # pgeo,
+        # plss_lyrx,
+        # ithk_lyrx,
         # topo_lyrx,
     ]
 
