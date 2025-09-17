@@ -35,10 +35,12 @@ def _parse_definition_query(layer_def: dict):
     Example ArcGIS Pro queries from the LYRX JSON:
         "Unit_Id" = 22
         "WellData_UnitThk" <> -9999 AND "WellData_Unit_Id" = 22
+        [FeatureName] = 'LK_Boundary'
 
     Example QGIS equivalents (including pipe delimiter for source URI):
         |subset=Unit_Id = 22
         |subset="WellData_UnitThk" != -9999 AND "WellData_Unit_Id" = 22
+        |subset=FeatureName = 'LK_Boundary'
 
     Args:
         layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
@@ -55,8 +57,8 @@ def _parse_definition_query(layer_def: dict):
         # ArcGIS uses '<>' for 'not equal', QGIS uses '!='
         qgis_query = definition_query.replace("<>", "!=")
 
-        # Optionally, handle other syntax differences here if needed
-
+        # Remove any square brackets around field names
+        qgis_query = qgis_query.replace("[", "").replace("]", "")
         # Return the query string with the pipe delimiter for QGIS
         return f"|subset={qgis_query}"
     return ""
@@ -267,7 +269,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
         # No join, just load the feature layer normally
         layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
         if not layer.isValid():
-            raise RuntimeError(f"Layer failed to load: {layer_name}")
+            raise RuntimeError(f"Layer failed to load: {layer_name} {abs_uri}")
         # Swap to relative URI for QLR
         layer.setDataSource(rel_uri, layer.name(), layer.providerType())
 
