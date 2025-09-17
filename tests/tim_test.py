@@ -24,6 +24,7 @@ if __name__ == "__main__":
 
     layers = [
         well_lyrx,
+        r'D:\GBDS\Map_Layers\GBDS Well field vis alias.lyrx',
         # salt_lyrx,
         # depo_lyrx,
         # anticline_lyrx,

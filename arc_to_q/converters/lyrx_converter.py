@@ -7,6 +7,8 @@ from pathlib import Path
 from qgis.core import (
     QgsApplication,
     QgsVectorLayer,
+    QgsEditorWidgetSetup,
+    QgsField,
     QgsVectorLayerJoinInfo,
     QgsVirtualLayerDefinition,
     QgsLayerDefinition,
@@ -230,6 +232,52 @@ def _set_display_field(layer: QgsVectorLayer, layer_def: dict):
         layer.setDisplayExpression(f'"{display_field}"')
 
 
+def _set_field_aliases_and_visibility(layer: QgsVectorLayer, layer_def: dict):
+    """
+    Sets field aliases and visibility for a QGIS layer based on the ArcGIS layer definition.
+
+    Args:
+        layer (QgsVectorLayer): The in-memory QGIS layer object to modify.
+        layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
+    """
+    feature_table = layer_def.get("featureTable", {})
+    fields_info = feature_table.get("fieldDescriptions", [])
+
+    if not fields_info or not layer:
+        return
+
+    # Build a mapping of field name to alias and visibility
+    alias_map = {}
+    visible_fields = set()
+    for field in fields_info:
+        name = field.get("fieldName")
+        alias = field.get("alias", name)
+        visible = field.get("visible", True)
+        if name:
+            alias_map[name] = alias
+            if visible:
+                visible_fields.add(name)
+
+    # Apply aliases
+    for idx, qgs_field in enumerate(layer.fields()):
+        field_name = qgs_field.name()
+        if field_name in alias_map:
+            layer.setFieldAlias(idx, alias_map[field_name])
+
+    # Configure attribute table visibility
+    table_config = layer.attributeTableConfig()
+    new_columns = []
+
+    for col in table_config.columns():
+        field_name = col.name
+        if field_name:  # skip empty/system columns
+            col.hidden = field_name not in visible_fields
+        new_columns.append(col)
+
+    table_config.setColumns(new_columns)
+    layer.setAttributeTableConfig(table_config)
+
+
 def _convert_feature_layer(in_folder, layer_def, out_file):
     layer_name = layer_def['name']
     f_table = layer_def["featureTable"]
@@ -276,6 +324,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     # Set other layer properties
     _set_display_field(layer, layer_def)
     set_symbology(layer, layer_def)
+    _set_field_aliases_and_visibility(layer, layer_def)
     # set_labels(layer, layer_def)
 
     return layer
