@@ -8,7 +8,8 @@ from qgis.core import (
     QgsVectorLayerSimpleLabeling,
     QgsTextRenderer,
     QgsRuleBasedLabeling,
-    QgsProperty
+    QgsProperty,
+    QgsUnitTypes
 )
 from PyQt5.QtGui import QFont
 
@@ -258,8 +259,51 @@ def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
     if feature_type == "Point":
         if point_method == "AroundPoint":
             labeling.placement = QgsPalLayerSettings.Placement.AroundPoint
-        elif point_method == "OnTopPoint":
+        elif point_method == "CenteredOnPoint":
             labeling.placement = QgsPalLayerSettings.Placement.OverPoint
+        elif "OfPoint" in point_method:
+            labeling.placement = QgsPalLayerSettings.Placement.OverPoint
+            offset = placement_props.get("offsetFromPoint", 1)
+            offset_unit = placement_props.get("primaryOffsetUnit", "Point")
+            unit_map = {
+                "Point": QgsUnitTypes.RenderPoints,
+                "Map": QgsUnitTypes.RenderMapUnits,
+                "MM": QgsUnitTypes.RenderMillimeters,
+                "Inch": QgsUnitTypes.RenderInches,
+                "Pixel": QgsUnitTypes.RenderPixels,
+            }            
+            labeling.offsetUnits = unit_map.get(offset_unit, QgsUnitTypes.RenderPoints)
+            dx = float(offset)
+            dy = float(offset)
+            if point_method == "EastOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.Right
+                dy = 0
+            elif point_method == "WestOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.Left
+                dy = 0
+                dx = -dx
+            elif point_method == "NorthOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.Above
+                dx = 0
+                dy = -dy
+            elif point_method == "SouthOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.Below
+                dx = 0
+            elif point_method == "NorthEastOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.AboveRight
+                dy = -dy
+            elif point_method == "NorthWestOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.AboveLeft
+                dx = -dx
+                dy = -dy
+            elif point_method == "SouthEastOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.BelowRight
+            elif point_method == "SouthWestOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.BelowLeft
+                dx = -dx
+            labeling.xOffset = dx
+            labeling.yOffset = dy
+
         else:
             labeling.placement = QgsPalLayerSettings.Placement.AroundPoint  # default fallback
 
@@ -283,7 +327,7 @@ def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
             labeling.placement = QgsPalLayerSettings.Placement.Line
 
     if not can_overrun_feature:
-        labeling.priority = 4
+        labeling.priority = 4  # E.g., keeps labels within polygon boundaries
 
     return labeling
 

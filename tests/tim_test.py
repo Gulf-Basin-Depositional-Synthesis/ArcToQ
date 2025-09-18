@@ -24,7 +24,7 @@ if __name__ == "__main__":
 
     layers = [
         # well_lyrx,
-        r'D:\GBDS\Map_Layers\BOEM Protraction Polygon.lyrx',
+        r'D:\GBDS\Map_Layers\LM1 Well Interval Thickness (ft).lyrx',
         # salt_lyrx,
         # depo_lyrx,
         # anticline_lyrx,
