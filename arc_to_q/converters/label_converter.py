@@ -238,6 +238,16 @@ def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
     labeling.setFormat(text_format)
     labeling.enabled = True
 
+    # --- Scale dependent rendering ---
+    min_scale = label_class.get("minimumScale")
+    max_scale = label_class.get("maximumScale")
+    if min_scale is not None:
+        labeling.minimumScale = float(min_scale)
+    if max_scale is not None:
+        labeling.maximumScale = float(max_scale)
+    if min_scale is not None or max_scale is not None:
+        labeling.scaleVisibility = True
+
     # --- Placement ---
     feature_type = placement_props.get("featureType")
     point_method = placement_props.get("pointPlacementMethod")

@@ -24,7 +24,7 @@ if __name__ == "__main__":
 
     layers = [
         # well_lyrx,
-        r'D:\GBDS\Map_Layers\labels with masks.lyrx',
+        r'D:\GBDS\Map_Layers\BOEM Protraction Polygon.lyrx',
         # salt_lyrx,
         # depo_lyrx,
         # anticline_lyrx,
