@@ -95,7 +95,7 @@ def _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file):
     if factory == "FileGDB":
         abs_uri = f"{abs_path.as_posix()}|layername={dataset}"
     else:
-        abs_uri = abs_path.as_posix()
+        abs_uri = os.path.join(abs_path.as_posix(), dataset)
 
     # Relative URI
     out_dir = Path(out_file).parent.resolve()
@@ -103,7 +103,13 @@ def _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file):
     if factory == "FileGDB":
         rel_uri = f"{rel_path.as_posix()}|layername={dataset}"
     else:
-        rel_uri = rel_path.as_posix()
+        rel_uri = os.path.join(rel_path.as_posix(), dataset)
+
+    if factory == "Shapefile":
+        if not rel_uri.lower().endswith(".shp"):
+            rel_uri += ".shp"
+        if not abs_uri.lower().endswith(".shp"):
+            abs_uri += ".shp"
 
     if def_query:
         abs_uri += def_query
