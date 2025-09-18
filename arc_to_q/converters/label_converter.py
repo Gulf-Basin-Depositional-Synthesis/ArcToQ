@@ -14,112 +14,7 @@ from qgis.core import (
 from PyQt5.QtGui import QFont
 
 from arc_to_q.converters.utils import parse_color
-
-import re
-
-def _vb_to_qgis(vb_expr: str) -> str:
-    """
-    Convert a limited set of VBScript/ArcGIS label expression syntax
-    into QGIS expression syntax.
-    Supports:
-      - Function FindLabel wrapper
-      - [Field] -> "Field"
-      - string literals "foo" -> 'foo'
-      - variable assignment -> inline replacement
-      - Select Case -> CASE WHEN
-      - If/ElseIf/Else -> CASE WHEN
-      - String concatenation (&) -> ||
-      - Special PLSS handling -> regexp_replace solution
-    """
-
-    expr = vb_expr.strip()
-
-    # Remove Function FindLabel wrapper
-    expr = re.sub(r"(?i)Function\s+FindLabel\s*\((.*?)\)", "", expr)
-    expr = re.sub(r"(?i)End Function", "", expr)
-    expr = expr.strip()
-
-    # Replace VBScript string literals "..." -> '...'
-    expr = re.sub(r'"([^"]*)"', r"'\1'", expr)
-
-    # Replace VBScript field refs [Field] -> "Field"
-    expr = re.sub(r"\[([A-Za-z0-9_]+)\]", r'"\1"', expr)
-
-    # Replace concatenation (& or +) with QGIS ||
-    expr = expr.replace("&", "||")
-    expr = re.sub(r"\+", "||", expr)   # catch stray +
-
-    # Replace If ... Then ... End If (simple form)
-    expr = re.sub(
-        r"If\s+(.*?)\s+Then\s+(.*?)\s+End If",
-        r"CASE WHEN \1 THEN \2 END",
-        expr,
-        flags=re.I | re.S,
-    )
-
-    # Replace ElseIf
-    expr = re.sub(
-        r"ElseIf\s+(.*?)\s+Then",
-        r"WHEN \1 THEN",
-        expr,
-        flags=re.I,
-    )
-
-    # Replace Else
-    expr = re.sub(r"Else", "ELSE", expr, flags=re.I)
-
-    # Replace End If
-    expr = re.sub(r"End If", "END", expr, flags=re.I)
-
-    # Replace Select Case … End Select
-    def convert_select_case(match):
-        block = match.group(1)
-        lines = [l.strip() for l in block.splitlines() if l.strip()]
-        cases = []
-        for l in lines:
-            m_case = re.match(r"Case\s+(.*)", l, flags=re.I)
-            if m_case:
-                cond = m_case.group(1)
-                cond = cond.replace(",", " OR ")  # multiple values
-                cases.append(f"WHEN {cond} THEN ")  # RHS will be appended
-            elif "=" in l or "||" in l or "'" in l or '"' in l:
-                cases[-1] += l
-        return "CASE " + " ".join(cases) + " END"
-
-    expr = re.sub(r"(?is)Select Case(.*?)End Select", convert_select_case, expr)
-
-    # Special-case: PLSS split/join loop
-    if "split(" in expr.lower() and "join" in expr.lower():
-        expr = 'regexp_replace("NAME1", \'([^ ]+ [^ ]+) \', \'\\\\1\\n\')'
-
-    # Cleanup multiple spaces
-    expr = re.sub(r"\s+", " ", expr)
-
-    return expr.strip()
-
-def _parse_vbscript_expression(expression: str) -> str:
-    """Convert a simple VBScript expression to QGIS expression.
-    
-    E.g., [Transect_Name] to Transect_Name
-    
-    Args:
-        expression (str): The VBScript expression from ArcGIS Pro.
-
-    Returns:
-        tuple: (converted expression for QGIS, is_expression flag)
-    """
-    is_expression = False
-    if " " in expression:
-        # Assume it's a more complex expression; try to convert
-        expression = _vb_to_qgis(expression)
-        is_expression = True
-    else:
-        # Remove brackets used in VBScript for field names
-        expression = expression.replace("[", "").replace("]", "")
-        # If "." in expression, it might be a table.field reference; remove table prefix
-        if "." in expression:
-            expression = expression.split(".")[-1]
-    return expression, is_expression
+from arc_to_q.converters.label_vbscript_converter import convert_label_expression
 
 
 def _parse_arcade_expression(expression: str) -> str:
@@ -160,7 +55,7 @@ def _parse_expression(expression: str, express_engine: str) -> str:
     if express_engine == "Arcade":
         return _parse_arcade_expression(expression), is_expression
     elif express_engine == "VBScript":
-        return _parse_vbscript_expression(expression)
+        return convert_label_expression(expression)
     else:
         # Default behavior: remove ArcGIS-specific characters
         return expression.replace("[", "").replace("]", ""), is_expression

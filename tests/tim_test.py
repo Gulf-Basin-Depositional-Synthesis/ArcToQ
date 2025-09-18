@@ -17,21 +17,39 @@ from arc_to_q.converters.lyrx_converter import convert_lyrx
 
 if __name__ == "__main__":
     output_folder = r'D:\GBDS\Map_Layers_QGIS'
-    ithk_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\22_UM\Well Interval Thickness.lyrx'
+
+    ithk = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\24_MM\Well Interval Thickness.lyrx'
+    cthk = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\54_PW\Well Carbonate Thickness.lyrx'
+    sthk = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\54_PW\Well Sandstone Thickness.lyrx'
+    utop = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\54_PW\Well Unit Top.lyrx'
+    depo = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\54_PW\Well Depofacies.lyrx'
+    tops_all_wells = r'D:\GBDS\Map_Layers\Tops for All Wells.lyrx'
     well_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
     plss_lyrx = r'D:\GBDS\Map_Layers\Basemap\Public Land Survey System.lyrx'
-    depo_lyrx = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\10_PS\Well Depofacies.lyrx'
+    braun_top = r'D:\GBDS\Map_Layers\1388_Top SH Qualifiers.lyrx'
+    braun_iso = r'D:\GBDS\Map_Layers\1388_Iso PW.lyrx'
+    pitman = r'D:\GBDS\Map_Layers\1421_LS_Rooted_Salt_Stock_Turtle_Structure_Pitman_USGS.lyrx'
+    zarra = r'D:\GBDS\Map_Layers\Wilcox Isopach.lyrx'
+    padilla_cuat = r'D:\GBDS\Map_Layers\Cuaternary_Pacific_Ocean_Crust.lyrx'
+    padilla_iso = r'D:\GBDS\Map_Layers\PacificOceanCrust_Isochron.lyrx'
+    topobathy = r'D:\GBDS\Map_Layers\Topography and Bathmetry Contours_8M.lyrx'
 
     layers = [
         # well_lyrx,
-        r'D:\GBDS\Map_Layers\LM1 Well Interval Thickness (ft).lyrx',
-        # salt_lyrx,
-        # depo_lyrx,
-        # anticline_lyrx,
-        # pgeo,
         # plss_lyrx,
-        # ithk_lyrx,
-        # topo_lyrx,
+        # tops_all_wells,
+        topobathy,
+        zarra,
+        padilla_cuat,
+        padilla_iso,
+        # ithk,
+        # cthk,
+        # sthk,
+        # utop,
+        # depo,
+        # braun_top,
+        # braun_iso,
+        # pitman,
     ]
 
     qgs = QgsApplication([], False)
