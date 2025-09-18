@@ -33,6 +33,8 @@ if __name__ == "__main__":
     padilla_cuat = r'D:\GBDS\Map_Layers\Cuaternary_Pacific_Ocean_Crust.lyrx'
     padilla_iso = r'D:\GBDS\Map_Layers\PacificOceanCrust_Isochron.lyrx'
     topobathy = r'D:\GBDS\Map_Layers\Topography and Bathmetry Contours_8M.lyrx'
+    off_collapsed = r'D:\GBDS\Map_Layers\off_collapsed.lyrx'
+    on_expanded = r'D:\GBDS\Map_Layers\on_expanded.lyrx'
 
     layers = [
         # well_lyrx,
@@ -41,7 +43,9 @@ if __name__ == "__main__":
         # topobathy,
         # zarra,
         # padilla_cuat,
-        padilla_iso,
+        # padilla_iso,
+        off_collapsed,
+        on_expanded,
         # ithk,
         # cthk,
         # sthk,

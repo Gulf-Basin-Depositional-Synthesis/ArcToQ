@@ -7,12 +7,11 @@ from pathlib import Path
 from qgis.core import (
     QgsApplication,
     QgsVectorLayer,
-    QgsEditorWidgetSetup,
-    QgsField,
-    QgsVectorLayerJoinInfo,
     QgsVirtualLayerDefinition,
     QgsLayerDefinition,
-    QgsReadWriteContext
+    QgsReadWriteContext,
+    QgsLayerTreeGroup,
+    Qgis
 )
 
 from arc_to_q.converters.symbology_converter import set_symbology
@@ -336,6 +335,41 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     return layer
 
 
+def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> None:
+    """
+    Exports a .qlr that contains a layer-tree entry with a "checked" (visible) state.
+
+    Why this is needed:
+      - QgsLayerDefinition.exportLayerDefinitionLayers(...) does NOT write any layer tree,
+        so it cannot preserve 'checked' visibility. We must export selected tree nodes instead.
+        (QGIS API: "This is a low-level routine that does not write layer tree.")  # noqa
+      - By creating a temporary layer-tree node (QgsLayerTreeLayer) and calling
+        QgsLayerDefinition.exportLayerDefinition(...), the resulting QLR includes
+        <layer-tree-layer ... checked="Qt::Checked"> (visibility on).  # noqa
+
+    Args:
+        out_layer (QgsMapLayer): the in-memory layer you constructed.
+        layer_def (dict): parsed LYRX layer definition (used to read ArcGIS 'visibility'/'expanded').
+        out_file (str): path to save the .qlr.
+    """
+    # Determine visibility and expansion from LYRX (ArcGIS Pro)
+    # In ArcGIS Pro, `visibility` corresponds to whether the item is checked in the Contents pane.
+    visible = bool(layer_def.get("visibility", True))
+    expanded = bool(layer_def.get("expanded", False))
+
+    # Build a minimal in-memory layer tree and set visibility
+    root = QgsLayerTreeGroup()                  # temporary root (not tied to a QgsProject)
+    node = root.addLayer(out_layer)             # creates a QgsLayerTreeLayer
+    node.setItemVisibilityChecked(visible)      # <-- the important bit (checked/unchecked)
+    node.setExpanded(expanded)
+
+    # Export the QLR including the layer tree node
+    error_message = ""
+    ok, error_message = QgsLayerDefinition.exportLayerDefinition(out_file, [node])
+    if not ok:
+        raise RuntimeError(f"Failed to export layer definition: {error_message}")
+
+
 def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
     """Convert an ArcGIS Pro .lyrx file to a QGIS .qlr file
 
@@ -369,12 +403,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         _set_metadata(out_layer, layer_def)
         _set_scale_visibility(out_layer, layer_def)
 
-        # visibility = layer_def.get("visibility", False)
-        # expanded = layer_def.get("expanded", False)
-
-        doc = QgsLayerDefinition.exportLayerDefinitionLayers([out_layer], QgsReadWriteContext())
-        with open(out_file, 'w', encoding='utf-8') as f:
-            f.write(doc.toString())
+        _export_qlr_with_visibility(out_layer, layer_def, out_file)
     except Exception as e:
         print(f"Error converting LYRX: {e}")
     finally:
