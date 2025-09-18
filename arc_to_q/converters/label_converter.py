@@ -8,117 +8,13 @@ from qgis.core import (
     QgsVectorLayerSimpleLabeling,
     QgsTextRenderer,
     QgsRuleBasedLabeling,
-    QgsProperty
+    QgsProperty,
+    QgsUnitTypes
 )
 from PyQt5.QtGui import QFont
 
 from arc_to_q.converters.utils import parse_color
-
-import re
-
-def _vb_to_qgis(vb_expr: str) -> str:
-    """
-    Convert a limited set of VBScript/ArcGIS label expression syntax
-    into QGIS expression syntax.
-    Supports:
-      - Function FindLabel wrapper
-      - [Field] -> "Field"
-      - string literals "foo" -> 'foo'
-      - variable assignment -> inline replacement
-      - Select Case -> CASE WHEN
-      - If/ElseIf/Else -> CASE WHEN
-      - String concatenation (&) -> ||
-      - Special PLSS handling -> regexp_replace solution
-    """
-
-    expr = vb_expr.strip()
-
-    # Remove Function FindLabel wrapper
-    expr = re.sub(r"(?i)Function\s+FindLabel\s*\((.*?)\)", "", expr)
-    expr = re.sub(r"(?i)End Function", "", expr)
-    expr = expr.strip()
-
-    # Replace VBScript string literals "..." -> '...'
-    expr = re.sub(r'"([^"]*)"', r"'\1'", expr)
-
-    # Replace VBScript field refs [Field] -> "Field"
-    expr = re.sub(r"\[([A-Za-z0-9_]+)\]", r'"\1"', expr)
-
-    # Replace concatenation (& or +) with QGIS ||
-    expr = expr.replace("&", "||")
-    expr = re.sub(r"\+", "||", expr)   # catch stray +
-
-    # Replace If ... Then ... End If (simple form)
-    expr = re.sub(
-        r"If\s+(.*?)\s+Then\s+(.*?)\s+End If",
-        r"CASE WHEN \1 THEN \2 END",
-        expr,
-        flags=re.I | re.S,
-    )
-
-    # Replace ElseIf
-    expr = re.sub(
-        r"ElseIf\s+(.*?)\s+Then",
-        r"WHEN \1 THEN",
-        expr,
-        flags=re.I,
-    )
-
-    # Replace Else
-    expr = re.sub(r"Else", "ELSE", expr, flags=re.I)
-
-    # Replace End If
-    expr = re.sub(r"End If", "END", expr, flags=re.I)
-
-    # Replace Select Case … End Select
-    def convert_select_case(match):
-        block = match.group(1)
-        lines = [l.strip() for l in block.splitlines() if l.strip()]
-        cases = []
-        for l in lines:
-            m_case = re.match(r"Case\s+(.*)", l, flags=re.I)
-            if m_case:
-                cond = m_case.group(1)
-                cond = cond.replace(",", " OR ")  # multiple values
-                cases.append(f"WHEN {cond} THEN ")  # RHS will be appended
-            elif "=" in l or "||" in l or "'" in l or '"' in l:
-                cases[-1] += l
-        return "CASE " + " ".join(cases) + " END"
-
-    expr = re.sub(r"(?is)Select Case(.*?)End Select", convert_select_case, expr)
-
-    # Special-case: PLSS split/join loop
-    if "split(" in expr.lower() and "join" in expr.lower():
-        expr = 'regexp_replace("NAME1", \'([^ ]+ [^ ]+) \', \'\\\\1\\n\')'
-
-    # Cleanup multiple spaces
-    expr = re.sub(r"\s+", " ", expr)
-
-    return expr.strip()
-
-def _parse_vbscript_expression(expression: str) -> str:
-    """Convert a simple VBScript expression to QGIS expression.
-    
-    E.g., [Transect_Name] to Transect_Name
-    
-    Args:
-        expression (str): The VBScript expression from ArcGIS Pro.
-
-    Returns:
-        tuple: (converted expression for QGIS, is_expression flag)
-    """
-    is_expression = False
-    if " " in expression:
-        # Assume it's a more complex expression; try to convert
-        expression = _vb_to_qgis(expression)
-        is_expression = True
-    else:
-        # Remove brackets used in VBScript for field names
-        expression = expression.replace("[", "").replace("]", "")
-        # If "." in expression, it might be a table.field reference; remove table prefix
-        if "." in expression:
-            expression = expression.split(".")[-1]
-    return expression, is_expression
+from arc_to_q.converters.label_vbscript_converter import convert_label_expression
 
 
 def _parse_arcade_expression(expression: str) -> str:
@@ -159,7 +55,7 @@ def _parse_expression(expression: str, express_engine: str) -> str:
     if express_engine == "Arcade":
         return _parse_arcade_expression(expression), is_expression
     elif express_engine == "VBScript":
-        return _parse_vbscript_expression(expression)
+        return convert_label_expression(expression)
     else:
         # Default behavior: remove ArcGIS-specific characters
         return expression.replace("[", "").replace("]", ""), is_expression
@@ -209,12 +105,44 @@ def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
     color = _color_from_symbol_layers(text_symbol["symbol"]["symbolLayers"])
     text_format.setColor(color)
 
+
+    # --- Halo ---
+    def _get_halo_size():
+        hs = text_symbol.get("haloSize", None)
+        try:
+            return float(hs) if hs is not None else None
+        except Exception:
+            return None
+
+    halo_size = _get_halo_size()
+    halo_symbol = text_symbol.get("haloSymbol", None)
+    halo_layers = halo_symbol.get("symbolLayers", []) if halo_symbol else []
+    halo_present = (halo_layers) and (halo_size is not None and halo_size > 0)
+
+    if halo_present:
+        buffer_settings = QgsTextBufferSettings()
+        buffer_settings.setEnabled(True)
+        halo_color = _color_from_symbol_layers(halo_layers)
+        buffer_settings.setColor(halo_color)
+        buffer_settings.setSize(halo_size)
+        text_format.setBuffer(buffer_settings)
+
     # --- Label Settings ---
     labeling = QgsPalLayerSettings()
     labeling.fieldName = expression
     labeling.isExpression = is_expression
     labeling.setFormat(text_format)
     labeling.enabled = True
+
+    # --- Scale dependent rendering ---
+    min_scale = label_class.get("minimumScale")
+    max_scale = label_class.get("maximumScale")
+    if min_scale is not None:
+        labeling.minimumScale = float(min_scale)
+    if max_scale is not None:
+        labeling.maximumScale = float(max_scale)
+    if min_scale is not None or max_scale is not None:
+        labeling.scaleVisibility = True
 
     # --- Placement ---
     feature_type = placement_props.get("featureType")
@@ -226,8 +154,51 @@ def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
     if feature_type == "Point":
         if point_method == "AroundPoint":
             labeling.placement = QgsPalLayerSettings.Placement.AroundPoint
-        elif point_method == "OnTopPoint":
+        elif point_method == "CenteredOnPoint":
             labeling.placement = QgsPalLayerSettings.Placement.OverPoint
+        elif "OfPoint" in point_method:
+            labeling.placement = QgsPalLayerSettings.Placement.OverPoint
+            offset = placement_props.get("offsetFromPoint", 1)
+            offset_unit = placement_props.get("primaryOffsetUnit", "Point")
+            unit_map = {
+                "Point": QgsUnitTypes.RenderPoints,
+                "Map": QgsUnitTypes.RenderMapUnits,
+                "MM": QgsUnitTypes.RenderMillimeters,
+                "Inch": QgsUnitTypes.RenderInches,
+                "Pixel": QgsUnitTypes.RenderPixels,
+            }            
+            labeling.offsetUnits = unit_map.get(offset_unit, QgsUnitTypes.RenderPoints)
+            dx = float(offset)
+            dy = float(offset)
+            if point_method == "EastOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.Right
+                dy = 0
+            elif point_method == "WestOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.Left
+                dy = 0
+                dx = -dx
+            elif point_method == "NorthOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.Above
+                dx = 0
+                dy = -dy
+            elif point_method == "SouthOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.Below
+                dx = 0
+            elif point_method == "NorthEastOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.AboveRight
+                dy = -dy
+            elif point_method == "NorthWestOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.AboveLeft
+                dx = -dx
+                dy = -dy
+            elif point_method == "SouthEastOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.BelowRight
+            elif point_method == "SouthWestOfPoint":
+                labeling.quadOffset = QgsPalLayerSettings.QuadrantPosition.BelowLeft
+                dx = -dx
+            labeling.xOffset = dx
+            labeling.yOffset = dy
+
         else:
             labeling.placement = QgsPalLayerSettings.Placement.AroundPoint  # default fallback
 
@@ -251,7 +222,7 @@ def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
             labeling.placement = QgsPalLayerSettings.Placement.Line
 
     if not can_overrun_feature:
-        labeling.priority = 4
+        labeling.priority = 4  # E.g., keeps labels within polygon boundaries
 
     return labeling
 
