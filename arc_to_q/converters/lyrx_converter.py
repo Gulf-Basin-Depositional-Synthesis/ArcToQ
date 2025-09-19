@@ -12,6 +12,7 @@ from qgis.core import (
     QgsSingleSymbolRenderer,
     QgsSymbol,
     QgsVirtualLayerDefinition,
+    QgsLayerTreeGroup,
 )
 from arc_to_q.converters.vector.vector_renderer import VectorRenderer
 from arc_to_q.converters.label_converter import set_labels
@@ -35,14 +36,38 @@ def _open_lyrx(lyrx):
 def _parse_definition_query(layer_def: dict):
     """
     Parses the definition query (or "subset string") into a valid one for a QGIS layer.
+
+    Example ArcGIS Pro queries from the LYRX JSON:
+        "Unit_Id" = 22
+        "WellData_UnitThk" <> -9999 AND "WellData_Unit_Id" = 22
+        [FeatureName] = 'LK_Boundary'
+
+    Example QGIS equivalents (including pipe delimiter for source URI):
+        |subset=Unit_Id = 22
+        |subset="WellData_UnitThk" != -9999 AND "WellData_Unit_Id" = 22
+        |subset=FeatureName = 'LK_Boundary'
+
+    Args:
+        layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
+
+    Returns:
+        str: The QGIS-compatible definition query string, or an empty string if none,
+             including the leading "|subset=" part.
     """
     feature_table = layer_def.get("featureTable", {})
     definition_query = feature_table.get("definitionExpression", "").strip()
 
     if definition_query:
+        # Replace ArcGIS-style operators with QGIS-compatible ones
+        # ArcGIS uses '<>' for 'not equal', QGIS uses '!='
         qgis_query = definition_query.replace("<>", "!=")
+
+        # Remove any square brackets around field names
+        qgis_query = qgis_query.replace("[", "").replace("]", "")
+        # Return the query string with the pipe delimiter for QGIS
         return f"|subset={qgis_query}"
     return ""
+
 
 
 def _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file):
@@ -132,16 +157,34 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
 
 def _set_scale_visibility(layer: QgsVectorLayer, layer_def: dict):
     """Set the scale visibility for a QGIS layer based on the ArcGIS layer definition."""
+    scale_opts = layer_def.get("layerScaleVisibilityOptions", {})
+    if scale_opts:
+        if scale_opts.get("type") != "CIMLayerScaleVisibilityOptions":
+            raise Exception(f"Unexpected layer scale visibility options type: {scale_opts.get('type')}")
+        if "showLayerAtAllScales" in scale_opts and scale_opts["showLayerAtAllScales"] is True:
+            # Show layer at all scales, so no action needed
+            return
+
+    # Not showing at all scales, so set min/max if defined
     min_scale = layer_def.get("minScale", 0)
     max_scale = layer_def.get("maxScale", 0)
-    if min_scale != 0 or max_scale != 0:
-        layer.setScaleBasedVisibility(True)
-        layer.setMinimumScale(min_scale)
-        layer.setMaximumScale(max_scale)
+    if min_scale == 0 and max_scale == 0:
+        # No scale limits defined, so no action needed
+        return
+
+    layer.setScaleBasedVisibility(True)
+    layer.setMinimumScale(min_scale)
+    layer.setMaximumScale(max_scale)
 
 
 def _set_metadata(layer: QgsVectorLayer, layer_def: dict):
-    """Sets the metadata for a QGIS layer based on the ArcGIS layer definition."""
+    """
+    Sets the metadata for a QGIS layer based on the ArcGIS layer definition.
+
+    Args:
+        layer (QgsVectorLayer): The in-memory QGIS layer object to modify.
+        layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
+    """
     md = layer.metadata()
     if title := layer_def.get("name"):
         md.setTitle(title)
@@ -154,7 +197,17 @@ def _set_metadata(layer: QgsVectorLayer, layer_def: dict):
 
 
 def _set_display_field(layer: QgsVectorLayer, layer_def: dict):
-    """Sets the display field for a QGIS layer."""
+    """
+    Sets the display field (or "Display Name") for a QGIS layer.
+
+    In ArcGIS Pro, the "display field" controls what text is shown when using
+    the Identify tool. In QGIS, this is called the "Display Name".
+
+    Args:
+        layer (QgsVectorLayer): The in-memory QGIS layer object to modify.
+        layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
+    """
+    # In the LYRX JSON, the display field is usually under featureTable
     if feature_table := layer_def.get("featureTable"):
         if display_field := feature_table.get("displayField"):
             layer.setDisplayExpression(f'"{display_field}"')
@@ -166,6 +219,85 @@ def _set_definition_query(layer: QgsVectorLayer, layer_def: dict):
         if definition_query := feature_table.get("definitionExpression"):
             qgis_query = definition_query.strip().replace("[", "\"").replace("]", "\"").replace("<>", "!=")
             layer.setSubsetString(qgis_query)
+
+def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> None:
+    """
+    Exports a .qlr that contains a layer-tree entry with a "checked" (visible) state.
+
+    Why this is needed:
+      - QgsLayerDefinition.exportLayerDefinitionLayers(...) does NOT write any layer tree,
+        so it cannot preserve 'checked' visibility. We must export selected tree nodes instead.
+        (QGIS API: "This is a low-level routine that does not write layer tree.")  # noqa
+      - By creating a temporary layer-tree node (QgsLayerTreeLayer) and calling
+        QgsLayerDefinition.exportLayerDefinition(...), the resulting QLR includes
+        <layer-tree-layer ... checked="Qt::Checked"> (visibility on).  # noqa
+
+    Args:
+        out_layer (QgsMapLayer): the in-memory layer you constructed.
+        layer_def (dict): parsed LYRX layer definition (used to read ArcGIS 'visibility'/'expanded').
+        out_file (str): path to save the .qlr.
+    """
+    # Determine visibility and expansion from LYRX (ArcGIS Pro)
+    # In ArcGIS Pro, `visibility` corresponds to whether the item is checked in the Contents pane.
+    visible = bool(layer_def.get("visibility", True))
+    expanded = bool(layer_def.get("expanded", False))
+
+    # Build a minimal in-memory layer tree and set visibility
+    root = QgsLayerTreeGroup()                  # temporary root (not tied to a QgsProject)
+    node = root.addLayer(out_layer)             # creates a QgsLayerTreeLayer
+    node.setItemVisibilityChecked(visible)      # <-- the important bit (checked/unchecked)
+    node.setExpanded(expanded)
+
+    # Export the QLR including the layer tree node
+    error_message = ""
+    ok, error_message = QgsLayerDefinition.exportLayerDefinition(out_file, [node])
+    if not ok:
+        raise RuntimeError(f"Failed to export layer definition: {error_message}")
+
+def _set_field_aliases_and_visibility(layer: QgsVectorLayer, layer_def: dict):
+    """
+    Sets field aliases and visibility for a QGIS layer based on the ArcGIS layer definition.
+
+    Args:
+        layer (QgsVectorLayer): The in-memory QGIS layer object to modify.
+        layer_def (dict): The parsed JSON dictionary of an ArcGIS layer definition.
+    """
+    feature_table = layer_def.get("featureTable", {})
+    fields_info = feature_table.get("fieldDescriptions", [])
+
+    if not fields_info or not layer:
+        return
+
+    # Build a mapping of field name to alias and visibility
+    alias_map = {}
+    visible_fields = set()
+    for field in fields_info:
+        name = field.get("fieldName")
+        alias = field.get("alias", name)
+        visible = field.get("visible", True)
+        if name:
+            alias_map[name] = alias
+            if visible:
+                visible_fields.add(name)
+
+    # Apply aliases
+    for idx, qgs_field in enumerate(layer.fields()):
+        field_name = qgs_field.name()
+        if field_name in alias_map:
+            layer.setFieldAlias(idx, alias_map[field_name])
+
+    # Configure attribute table visibility
+    table_config = layer.attributeTableConfig()
+    new_columns = []
+
+    for col in table_config.columns():
+        field_name = col.name
+        if field_name:  # skip empty/system columns
+            col.hidden = field_name not in visible_fields
+        new_columns.append(col)
+
+    table_config.setColumns(new_columns)
+    layer.setAttributeTableConfig(table_config)
 
 
 def _convert_feature_layer(in_folder, layer_def, out_file):
@@ -199,6 +331,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
         layer.setDataSource(rel_uri, layer.name(), layer.providerType())
 
     _set_display_field(layer, layer_def)
+    _set_field_aliases_and_visibility(layer, layer_def)
 
     renderer_factory = VectorRenderer()
     qgis_renderer = renderer_factory.create_renderer(layer_def.get("renderer", {}), layer)
@@ -214,17 +347,13 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
 
 
 def _convert_raster_layer(in_folder, layer_def, out_file):
-    """Converts a raster layer, ensuring custom CRS is registered."""
-    '''if arcgis_crs_name := layer_def.get('spatialReference', {}).get('name'):
-        if proj_string := CUSTOM_CRS_DEFINITIONS.get(arcgis_crs_name):
-            save_custom_crs_to_database(arcgis_crs_name, proj_string)'''
 
     data_connection = layer_def.get('dataConnection', {})
     (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
     layer_name = layer_def.get('name', os.path.basename(abs_uri))
 
     qgis_layer = create_raster_layer(abs_uri, layer_name)
-    #print_raster_debug_info(qgis_layer)
+   
     apply_raster_symbology(qgis_layer, layer_def)
     switch_to_relative_path(qgis_layer, rel_uri)
     return qgis_layer
@@ -253,15 +382,18 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             out_layer = _convert_raster_layer(in_folder, layer_def, out_file)
         elif layer_type == 'CIMAnnotationLayer':
             print("Annotation layers are unsupported")
+            return # Exit for unsupported types
         else:
             raise Exception(f"Unhandled layer type: {layer_type}")
 
+        # The following two calls are now handled by the export function,
+        # ensuring metadata and scale visibility are part of the exported QLR tree.
         _set_metadata(out_layer, layer_def)
         _set_scale_visibility(out_layer, layer_def)
 
-        doc = QgsLayerDefinition.exportLayerDefinitionLayers([out_layer], QgsReadWriteContext())
-        with open(out_file, 'w', encoding='utf-8') as f:
-            f.write(doc.toString())
+        # Use export function to correctly handle visibility.
+        _export_qlr_with_visibility(out_layer, layer_def, out_file)
+
         print(f"Successfully converted {in_lyrx} to {out_file}")
     except Exception as e:
         print(f"Error converting LYRX: {e}")
