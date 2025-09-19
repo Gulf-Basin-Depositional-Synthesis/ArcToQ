@@ -39,6 +39,7 @@ from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtCore import Qt
 from arc_to_q.converters.vector.symbols import SymbolFactory
 from arc_to_q.converters.utils import parse_color
+from .expression_translator import translate_arcade_expression
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ class VectorRenderer:
         into a single QGIS CASE...WHEN...END expression.
         """
         arcade_expr = renderer_def["valueExpressionInfo"]["expression"]
-        qgis_case_expression = self._translate_arcade_to_case(arcade_expr)
+        qgis_case_expression = translate_arcade_expression(arcade_expr)
 
         if not qgis_case_expression:
              raise RendererCreationError("Failed to translate Arcade expression to CASE statement.")
@@ -259,61 +260,6 @@ class VectorRenderer:
                     renderer.setSourceSymbol(default_symbol.clone())
 
         return renderer
-
-    def _translate_arcade_to_case(self, arcade_expr: str) -> str:
-        """
-        Translates a full Arcade if/else if/else block into a QGIS CASE statement.
-        """
-        rules = self._parse_arcade_if_else(arcade_expr)
-        if not rules:
-            return ""
-
-        case_parts = ["CASE"]
-        
-        else_rule = None
-        if rules and rules[-1][0].lower() == 'true':
-            else_rule = rules.pop()
-
-        for condition, return_value in rules:
-            qgis_condition = self._translate_arcade_condition_to_qgis(condition)
-            case_parts.append(f"    WHEN {qgis_condition} THEN '{return_value}'")
-    
-        if else_rule:
-            case_parts.append(f"    ELSE '{else_rule[1]}'")
-    
-        case_parts.append("END")
-        
-        full_expression = "\n".join(case_parts)
-        logger.info(f"Translated Arcade to CASE statement:\n{full_expression}")
-        return full_expression
-
-    def _parse_arcade_if_else(self, expression: str) -> List[tuple]:
-        """
-        Parses an if/else if/else Arcade expression into a list of
-        (condition, return_value) tuples. The 'else' case has a condition of 'True'.
-        """
-        rules = []
-        pattern = re.compile(
-            r"(?:if|else if)\s*\((.*?)\)\s*\{.*?return\s*['\"](.*?)['\"].*?\}",
-            re.DOTALL | re.IGNORECASE
-        )
-        for match in pattern.finditer(expression):
-            rules.append((match.group(1).strip(), match.group(2).strip()))
-            
-        else_pattern = re.compile(r"else\s*\{.*?return\s*['\"](.*?)['\"].*?\}", re.DOTALL | re.IGNORECASE)
-        if else_match := else_pattern.search(expression):
-            rules.append(('True', else_match.group(1).strip()))
-            
-        return rules
-
-    def _translate_arcade_condition_to_qgis(self, condition: str) -> str:
-        """
-        Translates a single Arcade condition string into a QGIS expression string.
-        """
-        qgis_expr = re.sub(r"\$feature\.(\w+)", r'"\1"', condition)
-        qgis_expr = qgis_expr.replace("&&", "AND").replace("||", "OR")
-        qgis_expr = qgis_expr.replace("==", "=")
-        return qgis_expr
         
     def _create_categorized_renderer(self, renderer_def: Dict[str, Any],
                                      layer: QgsVectorLayer) -> QgsCategorizedSymbolRenderer:
@@ -457,91 +403,57 @@ class VectorRenderer:
                                     layer: QgsVectorLayer) -> QgsGraduatedSymbolRenderer:
         """
         Create a QGIS graduated renderer from a CIMClassBreaksRenderer definition.
-        This handles both standard class breaks (by prioritizing their embedded symbols)
         """
-        # --- Check for Unclassed (Continuous) renderer first ---
-        if renderer_def.get("classBreakType") == "UnclassedColor":
-            return self._create_unclassed_color_renderer(renderer_def, layer)
+        # --- START: Consolidated Logic ---
+        expression_string = None
+        is_expression = "valueExpressionInfo" in renderer_def
 
-        # --- Proceed with standard discrete class breaks ---
-        field_name = renderer_def.get("field")
-        if not field_name:
-            raise RendererCreationError("No field name found for class breaks renderer")
-        if not self._validate_field_exists(layer, field_name):
-            raise RendererCreationError(f"Field '{field_name}' not found in layer '{layer.name()}'")
+        if is_expression:
+            arcade_expr = renderer_def["valueExpressionInfo"]["expression"]
+            expression_string = translate_arcade_expression(arcade_expr)
+        else:
+            expression_string = renderer_def.get("field")
+
+        if not expression_string:
+            raise RendererCreationError("No field or translatable expression found for class breaks renderer")
+
+        # Only validate the field if it's not a complex expression
+        if not is_expression and not self._validate_field_exists(layer, expression_string):
+            raise RendererCreationError(f"Field '{expression_string}' not found in layer '{layer.name()}'")
+        # --- END: Consolidated Logic ---
+
+        if renderer_def.get("classBreakType") == "UnclassedColor":
+            # Pass the processed expression_string to the helper function
+            return self._create_unclassed_color_renderer(renderer_def, layer, expression_string)
 
         breaks = renderer_def.get("breaks", [])
         if not breaks:
-            logger.warning("No breaks found in class breaks renderer definition")
-            return self._create_default_graduated_renderer(layer, field_name)
+            return self._create_default_graduated_renderer(layer, expression_string)
 
-        # Get minimum break from renderer definition
         minimum_break = renderer_def.get("minimumBreak", 0.0)
-        
-        # Check if we need to handle color interpolation for GraduatedColor type
-        class_break_type = renderer_def.get("classBreakType", "")
-        color_ramp = renderer_def.get("colorRamp")
-        
-        # Extract colors for interpolation if this is a GraduatedColor renderer
-        interpolated_colors = None
-        if class_break_type == "GraduatedColor" and color_ramp:
-            base_colors = self._extract_colors_from_ramp(color_ramp)
-            if base_colors:
-                interpolated_colors = self._create_interpolated_colors(base_colors, len(breaks))
-                logger.info(f"Created {len(interpolated_colors)} interpolated colors for graduated renderer")
-
-        # Check for reversed order
         is_reversed = not renderer_def.get("showInAscendingOrder", True)
-        
-        # Create ranges based on order
+
         ranges = []
+        lower_bound = minimum_break
+        
+        symbols = [self.symbol_factory.create_symbol(b.get("symbol", {})) or self._create_default_symbol(layer) for b in breaks]
         if is_reversed:
-            logger.info("Creating ranges in descending order")
-            # For reversed order, we need to process breaks from high to low
-            for i in range(len(breaks)):
-                break_def = breaks[i]
-                upper_bound = break_def.get("upperBound", 0.0)
-                
-                # Determine lower bound
-                if i < len(breaks) - 1:
-                    lower_bound = breaks[i + 1].get("upperBound", minimum_break)
-                else:
-                    lower_bound = minimum_break
-                
-                # Apply color if we have interpolated colors
-                override_color = None
-                if interpolated_colors and i < len(interpolated_colors):
-                    # Use reversed color index for descending order
-                    color_idx = len(interpolated_colors) - 1 - i
-                    override_color = interpolated_colors[color_idx]
-                
-                range_obj = self._create_renderer_range(break_def, lower_bound, layer, override_color)
-                if range_obj:
-                    # Explicitly set bounds to ensure they're correct
-                    range_obj.setLowerValue(lower_bound)
-                    range_obj.setUpperValue(upper_bound)
-                    ranges.append(range_obj)
-        else:
-            logger.info("Creating ranges in ascending order")
-            # For ascending order, process normally
-            lower_bound = minimum_break
-            for i, break_def in enumerate(breaks):
-                upper_bound = break_def.get("upperBound", 0.0)
-                
-                # Apply color if we have interpolated colors
-                override_color = None
-                if interpolated_colors and i < len(interpolated_colors):
-                    override_color = interpolated_colors[i]
-                
-                range_obj = self._create_renderer_range(break_def, lower_bound, layer, override_color)
-                if range_obj:
-                    ranges.append(range_obj)
-                lower_bound = upper_bound
+            symbols.reverse()
+
+        for i, break_def in enumerate(breaks):
+            upper_bound = break_def.get("upperBound", 0.0)
+            label = break_def.get("label", f"{lower_bound:.2f} - {upper_bound:.2f}")
+            symbol = symbols[i].clone()
+            ranges.append(QgsRendererRange(lower_bound, upper_bound, symbol, label))
+            lower_bound = upper_bound
+        
+        if is_reversed:
+            ranges.reverse()
 
         if not ranges:
-            return self._create_default_graduated_renderer(layer, field_name)
+            return self._create_default_graduated_renderer(layer, expression_string)
 
-        renderer = QgsGraduatedSymbolRenderer(field_name, ranges)
+        renderer = QgsGraduatedSymbolRenderer(expression_string, ranges)
         self._apply_common_renderer_properties(renderer, renderer_def)
         return renderer
 
@@ -659,16 +571,12 @@ class VectorRenderer:
             return None
         
     def _create_unclassed_color_renderer(self, renderer_def: Dict[str, Any],
-                                        layer: QgsVectorLayer) -> QgsGraduatedSymbolRenderer:
+                                        layer: QgsVectorLayer, expression_string: str) -> QgsGraduatedSymbolRenderer:
         """
         Creates a QGIS Graduated renderer to replicate ArcGIS's "Unclassed Colors"
         by creating multiple ranges with interpolated colors to simulate a continuous gradient.
         """
         try:
-            field = renderer_def.get("field")
-            if not field:
-                raise RendererCreationError("Field not specified for UnclassedColor renderer.")
-
             # Look for the color visual variable which contains the actual gradient info
             color_var = next((var for var in renderer_def.get("visualVariables", [])
                             if var.get("type") == "CIMColorVisualVariable"), None)
@@ -721,7 +629,7 @@ class VectorRenderer:
                 label = f"{lower:.2f} - {upper:.2f}"
                 ranges.append(QgsRendererRange(lower, upper, symbol, label))
             
-            renderer = QgsGraduatedSymbolRenderer(field, ranges)
+            renderer = QgsGraduatedSymbolRenderer(expression_string, ranges)
             
             # Create and set the color ramp for the legend
             if len(colors) >= 2:
@@ -771,77 +679,53 @@ class VectorRenderer:
         """
         Create a QGIS graduated renderer from a CIMClassBreaksRenderer definition.
         """
-        # Check for Unclassed (Continuous) renderer first
-        if renderer_def.get("classBreakType") == "UnclassedColor":
-            return self._create_unclassed_color_renderer(renderer_def, layer)
+        expression_string = None
+        is_expression = "valueExpressionInfo" in renderer_def
 
-        # Proceed with standard discrete class breaks
-        field_name = renderer_def.get("field")
-        if not field_name:
-            raise RendererCreationError("No field name found for class breaks renderer")
-        if not self._validate_field_exists(layer, field_name):
-            raise RendererCreationError(f"Field '{field_name}' not found in layer '{layer.name()}'")
+        if is_expression:
+            arcade_expr = renderer_def["valueExpressionInfo"]["expression"]
+            expression_string = translate_arcade_expression(arcade_expr)
+        else:
+            expression_string = renderer_def.get("field")
+
+        if not expression_string:
+            raise RendererCreationError("No field or translatable expression found for class breaks renderer")
+
+        # Only validate the field if it's not a complex expression
+        if not is_expression and not self._validate_field_exists(layer, expression_string):
+            raise RendererCreationError(f"Field '{expression_string}' not found in layer '{layer.name()}'")
+
+        if renderer_def.get("classBreakType") == "UnclassedColor":
+            return self._create_unclassed_color_renderer(renderer_def, layer, expression_string)
 
         breaks = renderer_def.get("breaks", [])
         if not breaks:
-            logger.warning("No breaks found in class breaks renderer definition")
-            return self._create_default_graduated_renderer(layer, field_name)
+            return self._create_default_graduated_renderer(layer, expression_string)
 
         minimum_break = renderer_def.get("minimumBreak", 0.0)
         is_reversed = not renderer_def.get("showInAscendingOrder", True)
         
-        # Build ranges from breaks
         ranges = []
         lower_bound = minimum_break
         
-        # When reversed, we need to swap the symbols
+        symbols = [self.symbol_factory.create_symbol(b.get("symbol", {})) or self._create_default_symbol(layer) for b in breaks]
         if is_reversed:
-            # Create a reversed list of symbols
-            symbols = []
-            for break_def in breaks:
-                symbol_def = break_def.get("symbol", {})
-                symbol = self.symbol_factory.create_symbol(symbol_def)
-                if not symbol:
-                    symbol = self._create_default_symbol(layer)
-                symbols.append(symbol)
             symbols.reverse()
-            
-            # Now create ranges with swapped symbols
-            for i, break_def in enumerate(breaks):
-                upper_bound = break_def.get("upperBound", 0.0)
-                label = break_def.get("label", f"{lower_bound:.2f} - {upper_bound:.2f}")
-                
-                # Use the reversed symbol
-                symbol = symbols[i].clone()
-                
-                range_obj = QgsRendererRange(lower_bound, upper_bound, symbol, label)
-                ranges.append(range_obj)
-                logger.info(f"Created range: {lower_bound} - {upper_bound}, label: {label}")
-                
-                lower_bound = upper_bound
-            
-            # Reverse the ranges for display order
+
+        for i, break_def in enumerate(breaks):
+            upper_bound = break_def.get("upperBound", 0.0)
+            label = break_def.get("label", f"{lower_bound:.2f} - {upper_bound:.2f}")
+            symbol = symbols[i].clone()
+            ranges.append(QgsRendererRange(lower_bound, upper_bound, symbol, label))
+            lower_bound = upper_bound
+        
+        if is_reversed:
             ranges.reverse()
-        else:
-            # Normal ascending order - use symbols as defined
-            for break_def in breaks:
-                upper_bound = break_def.get("upperBound", 0.0)
-                label = break_def.get("label", f"{lower_bound:.2f} - {upper_bound:.2f}")
-                symbol_def = break_def.get("symbol", {})
-                
-                symbol = self.symbol_factory.create_symbol(symbol_def)
-                if not symbol:
-                    symbol = self._create_default_symbol(layer)
-                
-                range_obj = QgsRendererRange(lower_bound, upper_bound, symbol.clone(), label)
-                ranges.append(range_obj)
-                
-                lower_bound = upper_bound
 
         if not ranges:
-            return self._create_default_graduated_renderer(layer, field_name)
+            return self._create_default_graduated_renderer(layer, expression_string)
 
-        renderer = QgsGraduatedSymbolRenderer(field_name, ranges)
+        renderer = QgsGraduatedSymbolRenderer(expression_string, ranges)
         self._apply_common_renderer_properties(renderer, renderer_def)
         return renderer
     

@@ -2,7 +2,6 @@ from colorsys import hsv_to_rgb
 
 from qgis.PyQt.QtGui import QColor
 
-
 def parse_color(cim_color):
     """
     Parse ArcGIS CIM color into QColor.
