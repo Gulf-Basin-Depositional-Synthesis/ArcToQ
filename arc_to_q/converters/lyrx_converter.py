@@ -16,7 +16,7 @@ from qgis.core import (
 from arc_to_q.converters.vector.vector_renderer import RendererFactory
 from arc_to_q.converters.label_converter import set_labels
 from arc_to_q.converters.raster.raster_renderer import *
-from arc_to_q.converters.custom_crs_registry import CUSTOM_CRS_DEFINITIONS, save_custom_crs_to_database
+#from arc_to_q.converters.custom_crs_registry import CUSTOM_CRS_DEFINITIONS, save_custom_crs_to_database
 
 
 def _open_lyrx(lyrx):
@@ -188,16 +188,16 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
 
 def _convert_raster_layer(in_folder, layer_def, out_file):
     """Converts a raster layer, ensuring custom CRS is registered."""
-    if arcgis_crs_name := layer_def.get('spatialReference', {}).get('name'):
+    '''if arcgis_crs_name := layer_def.get('spatialReference', {}).get('name'):
         if proj_string := CUSTOM_CRS_DEFINITIONS.get(arcgis_crs_name):
-            save_custom_crs_to_database(arcgis_crs_name, proj_string)
+            save_custom_crs_to_database(arcgis_crs_name, proj_string)'''
 
     data_connection = layer_def.get('dataConnection', {})
     abs_uri, rel_uri = parse_raster_source(in_folder, data_connection, out_file)
     layer_name = layer_def.get('name', os.path.basename(abs_uri))
 
     qgis_layer = create_raster_layer(abs_uri, layer_name)
-    print_raster_debug_info(qgis_layer)
+    #print_raster_debug_info(qgis_layer)
     apply_raster_symbology(qgis_layer, layer_def)
     switch_to_relative_path(qgis_layer, rel_uri)
     return qgis_layer
