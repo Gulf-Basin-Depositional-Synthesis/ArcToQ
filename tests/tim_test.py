@@ -26,34 +26,22 @@ if __name__ == "__main__":
     tops_all_wells = r'D:\GBDS\Map_Layers\Tops for All Wells.lyrx'
     well_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
     plss_lyrx = r'D:\GBDS\Map_Layers\Basemap\Public Land Survey System.lyrx'
-    braun_top = r'D:\GBDS\Map_Layers\1388_Top SH Qualifiers.lyrx'
-    braun_iso = r'D:\GBDS\Map_Layers\1388_Iso PW.lyrx'
-    pitman = r'D:\GBDS\Map_Layers\1421_LS_Rooted_Salt_Stock_Turtle_Structure_Pitman_USGS.lyrx'
-    zarra = r'D:\GBDS\Map_Layers\Wilcox Isopach.lyrx'
-    padilla_cuat = r'D:\GBDS\Map_Layers\Cuaternary_Pacific_Ocean_Crust.lyrx'
-    padilla_iso = r'D:\GBDS\Map_Layers\PacificOceanCrust_Isochron.lyrx'
-    topobathy = r'D:\GBDS\Map_Layers\Topography and Bathmetry Contours_8M.lyrx'
-    off_collapsed = r'D:\GBDS\Map_Layers\off_collapsed.lyrx'
-    on_expanded = r'D:\GBDS\Map_Layers\on_expanded.lyrx'
+    mag = r'D:\GBDS\Map_Layers\Basemap\Magnetic Anomaly.lyrx'
+    tapestry = r'D:\GBDS\Map_Layers\Basemap\Tapestry of Time and Terrain.lyrx'
+    utop_grid = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\64_SH\Unit Top (seismic + wells).lyrx'
 
     layers = [
         # well_lyrx,
         # plss_lyrx,
         # tops_all_wells,
-        # topobathy,
-        # zarra,
-        # padilla_cuat,
-        # padilla_iso,
-        off_collapsed,
-        on_expanded,
+        mag,
+        # tapestry,
+        # utop_grid,
         # ithk,
         # cthk,
         # sthk,
         # utop,
         # depo,
-        # braun_top,
-        # braun_iso,
-        # pitman,
     ]
 
     qgs = QgsApplication([], False)

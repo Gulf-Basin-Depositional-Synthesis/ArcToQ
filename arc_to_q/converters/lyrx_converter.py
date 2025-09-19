@@ -7,6 +7,7 @@ from pathlib import Path
 from qgis.core import (
     QgsApplication,
     QgsVectorLayer,
+    QgsRasterLayer,
     QgsVirtualLayerDefinition,
     QgsLayerDefinition,
     QgsReadWriteContext,
@@ -65,7 +66,7 @@ def _parse_definition_query(layer_def: dict):
     return ""
 
 
-def _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file):
+def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
     """Helper to build absolute and relative URIs for a dataset.
     
     Args:
@@ -73,6 +74,7 @@ def _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file):
         conn_str (str): The workspace connection string from the .lyrx file.
         factory (str): The workspace factory type (e.g. "FileGDB", "Shapefile").
         dataset (str): The dataset name (e.g. feature class or table name).
+        dataset_type (str): The dataset type (e.g. "esriDTRasterDataset", "esriDTFeatureClass").
         def_query (str): The definition query string to append to the URI (or empty string).
             The query should already be in QGIS-compatible format, including the leading "|subset=".
         out_file (str): Path to the converted QGIS .qlr file.
@@ -92,7 +94,12 @@ def _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file):
 
     # Absolute URI
     if factory == "FileGDB":
-        abs_uri = f"{abs_path.as_posix()}|layername={dataset}"
+        if dataset_type == "esriDTFeatureClass":
+            abs_uri = f"{abs_path.as_posix()}|layername={dataset}"
+        elif dataset_type == "esriDTRasterDataset":
+            abs_uri = os.path.join(abs_path.as_posix(), dataset)
+        else:
+            raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
         abs_uri = os.path.join(abs_path.as_posix(), dataset)
 
@@ -100,19 +107,26 @@ def _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file):
     out_dir = Path(out_file).parent.resolve()
     rel_path = Path(os.path.relpath(abs_path, start=out_dir))
     if factory == "FileGDB":
-        rel_uri = f"{rel_path.as_posix()}|layername={dataset}"
+        if dataset_type == "esriDTFeatureClass":
+            rel_uri = f"{rel_path.as_posix()}|layername={dataset}"
+        elif dataset_type == "esriDTRasterDataset":
+            rel_uri = os.path.join(rel_path.as_posix(), dataset)
+        else:
+            raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
         rel_uri = os.path.join(rel_path.as_posix(), dataset)
 
-    if factory == "Shapefile":
-        if not rel_uri.lower().endswith(".shp"):
-            rel_uri += ".shp"
-        if not abs_uri.lower().endswith(".shp"):
-            abs_uri += ".shp"
+    if dataset_type == "esriDTFeatureClass":
+        if factory == "Shapefile":
+            if not rel_uri.lower().endswith(".shp"):
+                rel_uri += ".shp"
+            if not abs_uri.lower().endswith(".shp"):
+                abs_uri += ".shp"
 
-    if def_query:
-        abs_uri += def_query
-        rel_uri += def_query
+        if def_query:
+            abs_uri += def_query
+            rel_uri += def_query
+
     return abs_uri, rel_uri
 
 
@@ -137,10 +151,11 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
     factory = data_connection.get("workspaceFactory")
     conn_str = data_connection.get("workspaceConnectionString", "")
     dataset = data_connection.get("dataset")
+    dataset_type = data_connection.get("datasetType")
 
     # --- Handle direct connections (FileGDB, Shapefile, Raster) ---
     if factory and conn_str and dataset:
-        return _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file), None
+        return _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file), None
 
     # --- Handle table join (CIMRelQueryTableDataConnection) ---
     if data_connection.get("type") == "CIMRelQueryTableDataConnection":
@@ -335,6 +350,40 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     return layer
 
 
+def _convert_raster_layer(in_folder, layer_def, out_file):
+    """Create a QgsRasterLayer from a CIMRasterLayer layer definition."""
+    layer_name = layer_def.get("name", "Raster")
+
+    # ArcGIS CIM for rasters typically stores a dataConnection directly on the layer.
+    # Fallback in case it's nested (some exports).
+    data_connection = (
+        layer_def.get("dataConnection")
+        or layer_def.get("raster", {}).get("dataConnection")
+        or {}
+    )
+    if not data_connection:
+        raise RuntimeError("Raster layer missing 'dataConnection'.")
+
+    # No definition query for rasters
+    (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
+
+    # Load with GDAL provider
+    rlayer = QgsRasterLayer(abs_uri, layer_name, "gdal")
+    if not rlayer.isValid():
+        raise RuntimeError(f"Raster layer failed to load: {layer_name} {abs_uri}")
+
+    # Prefer relative path in the saved QLR
+    # setDataSource is available in QGIS 3 for generic map layers; if unavailable,
+    # you can remove this line to keep absolute paths in the QLR.
+    try:
+        rlayer.setDataSource(rel_uri, rlayer.name(), rlayer.providerType())
+    except Exception:
+        print("Warning: Could not set relative path for raster layer; using absolute path in QLR.")
+
+    # (Optional) raster symbology mapping can be added here in a future enhancement
+    return rlayer
+
+
 def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> None:
     """
     Exports a .qlr that contains a layer-tree entry with a "checked" (visible) state.
@@ -380,6 +429,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         qgs (QgsApplication, optional): An initialized QgsApplication instance. If not provided,
             a new instance will be created and initialized within this function.
     """
+    print(f"Converting {in_lyrx}...")
     if not out_folder:
         out_folder = os.path.dirname(in_lyrx)
     in_folder = os.path.abspath(os.path.dirname(in_lyrx))
@@ -392,12 +442,18 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
 
     try:
         lyrx = _open_lyrx(in_lyrx)
+        if len(lyrx["layers"]) != 1:
+            raise Exception(f"Unexpected number of layers found: {len(lyrx['layers'])}")
+
         layer_uri = lyrx["layers"][0]
         layer_def = next((ld for ld in lyrx.get("layerDefinitions", []) if ld.get("uRI") == layer_uri), {})
-        if layer_def.get("type") == "CIMFeatureLayer":
+        ltype = layer_def.get("type")
+        if ltype == "CIMFeatureLayer":
             out_layer = _convert_feature_layer(in_folder, layer_def, out_file)
+        elif ltype == "CIMRasterLayer":  # --- raster support ---
+            out_layer = _convert_raster_layer(in_folder, layer_def, out_file)
         else:
-            raise Exception(f"Unhandled layer type: {layer_def.get('type')}")
+            raise Exception(f"Unhandled layer type: {ltype}")
 
         # # Common properties
         _set_metadata(out_layer, layer_def)
