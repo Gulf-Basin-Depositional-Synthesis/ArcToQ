@@ -53,7 +53,7 @@ class UnsupportedRendererError(RendererCreationError):
     pass
 
 
-class RendererFactory:
+class VectorRenderer:
     """Factory class for creating QGIS renderers from ArcGIS CIM definitions."""
     
     def __init__(self):

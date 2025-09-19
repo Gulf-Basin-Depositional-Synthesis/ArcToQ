@@ -13,10 +13,13 @@ from qgis.core import (
     QgsSymbol,
     QgsVirtualLayerDefinition,
 )
-from arc_to_q.converters.vector.vector_renderer import RendererFactory
+from arc_to_q.converters.vector.vector_renderer import VectorRenderer
 from arc_to_q.converters.label_converter import set_labels
-from arc_to_q.converters.raster.raster_renderer import *
-#from arc_to_q.converters.custom_crs_registry import CUSTOM_CRS_DEFINITIONS, save_custom_crs_to_database
+from arc_to_q.converters.raster.raster_renderer import (
+    create_raster_layer,
+    apply_raster_symbology,
+    switch_to_relative_path,
+)
 
 
 def _open_lyrx(lyrx):
@@ -76,9 +79,33 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
     conn_str = data_connection.get("workspaceConnectionString", "")
     dataset = data_connection.get("dataset")
 
+    # Handle simple data sources (vector and raster)
     if factory and conn_str and dataset:
-        return _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file), None
+        if factory == "Raster":
+            if "=" in conn_str:
+                _, raw_path = conn_str.split("=", 1)
+            else:
+                raw_path = conn_str
 
+            lyrx_dir = Path(in_folder)
+            workspace_path = (lyrx_dir / raw_path).resolve()
+            abs_path = workspace_path / dataset
+            abs_uri = abs_path.as_posix()
+
+            try:
+                out_dir = Path(out_file).parent.resolve()
+                rel_path = Path(os.path.relpath(abs_path, start=out_dir))
+                rel_uri = rel_path.as_posix()
+            except ValueError:
+                # Fallback to absolute path if on different drives
+                rel_uri = abs_uri
+
+            return (abs_uri, rel_uri), None
+        else:
+            # This is the original logic for vector sources
+            return _make_uris(in_folder, conn_str, factory, dataset, def_query, out_file), None
+
+    # Handle joins (CIMRelQueryTableDataConnection)
     if data_connection.get("type") == "CIMRelQueryTableDataConnection":
         if def_query:
             raise NotImplementedError("Definition queries on joined layers are not yet supported.")
@@ -173,7 +200,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
 
     _set_display_field(layer, layer_def)
 
-    renderer_factory = RendererFactory()
+    renderer_factory = VectorRenderer()
     qgis_renderer = renderer_factory.create_renderer(layer_def.get("renderer", {}), layer)
     layer.setRenderer(qgis_renderer)
 
@@ -193,7 +220,7 @@ def _convert_raster_layer(in_folder, layer_def, out_file):
             save_custom_crs_to_database(arcgis_crs_name, proj_string)'''
 
     data_connection = layer_def.get('dataConnection', {})
-    abs_uri, rel_uri = parse_raster_source(in_folder, data_connection, out_file)
+    (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
     layer_name = layer_def.get('name', os.path.basename(abs_uri))
 
     qgis_layer = create_raster_layer(abs_uri, layer_name)
