@@ -15,7 +15,6 @@ from qgis.core import (
 )
 from arc_to_q.converters.vector.vector_renderer import RendererFactory
 from arc_to_q.converters.label_converter import set_labels
-from arc_to_q.converters.annotation_converter import *
 from arc_to_q.converters.raster.raster_renderer import *
 from arc_to_q.converters.custom_crs_registry import CUSTOM_CRS_DEFINITIONS, save_custom_crs_to_database
 
@@ -203,35 +202,6 @@ def _convert_raster_layer(in_folder, layer_def, out_file):
     switch_to_relative_path(qgis_layer, rel_uri)
     return qgis_layer
 
-
-def _convert_annotation_layer(in_folder, layer_def, out_file):
-    """Converts a CIMAnnotationLayer to a QgsVectorLayer with data-defined labeling."""
-    layer_name = layer_def['name']
-    
-    # Create the definition query (it will be an empty string for annotations)
-    def_query = _parse_definition_query(layer_def)
-    
-    # CORRECTED: Added the 'def_query' argument to the function call
-    (abs_uri, rel_uri), _ = _parse_source(in_folder, layer_def["featureTable"]["dataConnection"], def_query, out_file)
-    
-    layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
-    if not layer.isValid():
-        raise RuntimeError(f"Annotation layer failed to load: {layer_name} | Source: {abs_uri}")
-
-    symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-    symbol.setOpacity(0)
-    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-
-    layer.setLabelsEnabled(True)
-    if not apply_enhanced_annotation_converter(layer):
-        print(f"WARNING: Enhanced annotation conversion failed for layer {layer_name}")
-        # Add fallback basic labeling if needed
-    
-    layer.setDataSource(rel_uri, layer.name(), layer.providerType())
-    _set_definition_query(layer, layer_def)
-    return layer
-
-
 def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
     """Convert an ArcGIS Pro .lyrx file to a QGIS .qlr file"""
     if not out_folder:
@@ -255,7 +225,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         elif layer_type == 'CIMRasterLayer':
             out_layer = _convert_raster_layer(in_folder, layer_def, out_file)
         elif layer_type == 'CIMAnnotationLayer':
-            out_layer = _convert_annotation_layer(in_folder, layer_def, out_file)
+            print("Annotation layers are unsupported")
         else:
             raise Exception(f"Unhandled layer type: {layer_type}")
 
