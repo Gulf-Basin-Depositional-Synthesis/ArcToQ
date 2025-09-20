@@ -13,6 +13,7 @@ from qgis.core import (
     QgsSymbol,
     QgsVirtualLayerDefinition,
     QgsLayerTreeGroup,
+    QgsProject,
 )
 from arc_to_q.converters.vector.vector_renderer import VectorRenderer
 from arc_to_q.converters.label_converter import set_labels
@@ -300,7 +301,7 @@ def _set_field_aliases_and_visibility(layer: QgsVectorLayer, layer_def: dict):
     layer.setAttributeTableConfig(table_config)
 
 
-def _convert_feature_layer(in_folder, layer_def, out_file):
+def _convert_feature_layer(in_folder, layer_def, out_file, project):
     layer_name = layer_def['name']
     f_table = layer_def["featureTable"]
     if f_table["type"] != "CIMFeatureTable":
@@ -343,10 +344,11 @@ def _convert_feature_layer(in_folder, layer_def, out_file):
     if not layer.isValid():
         raise RuntimeError(f"Layer became invalid after setting relative path or query: {layer_name}")
 
+    project.addMapLayer(layer, False)
     return layer
 
 
-def _convert_raster_layer(in_folder, layer_def, out_file):
+def _convert_raster_layer(in_folder, layer_def, out_file, project):
 
     data_connection = layer_def.get('dataConnection', {})
     (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
@@ -356,6 +358,7 @@ def _convert_raster_layer(in_folder, layer_def, out_file):
    
     apply_raster_symbology(qgis_layer, layer_def)
     switch_to_relative_path(qgis_layer, rel_uri)
+    project.addMapLayer(qgis_layer, False)
     return qgis_layer
 
 def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
@@ -370,34 +373,95 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         qgs = QgsApplication([], False)
         qgs.initQgis()
 
+    project = QgsProject.instance()
+
     try:
         lyrx = _open_lyrx(in_lyrx)
         layer_uri = lyrx["layers"][0]
         layer_def = next((ld for ld in lyrx.get("layerDefinitions", []) if ld.get("uRI") == layer_uri), {})
         
         layer_type = layer_def.get("type")
-        if layer_type == "CIMFeatureLayer":
-            out_layer = _convert_feature_layer(in_folder, layer_def, out_file)
+        nodes_to_export = []
+
+        if layer_type == "CIMGroupLayer":
+            root_node = _convert_group_layer(in_folder, layer_def, lyrx, out_file, project)
+            nodes_to_export = [root_node]
+        elif layer_type == "CIMFeatureLayer":
+            out_layer = _convert_feature_layer(in_folder, layer_def, out_file, project)
+            _set_metadata(out_layer, layer_def)
+            _set_scale_visibility(out_layer, layer_def)
+            root_node = QgsLayerTreeGroup()
+            node = root_node.addLayer(out_layer)
+            node.setItemVisibilityChecked(bool(layer_def.get("visibility", True)))
+            node.setExpanded(bool(layer_def.get("expanded", False)))
+            nodes_to_export = [node]
         elif layer_type == 'CIMRasterLayer':
-            out_layer = _convert_raster_layer(in_folder, layer_def, out_file)
+            out_layer = _convert_raster_layer(in_folder, layer_def, out_file, project)
+            _set_metadata(out_layer, layer_def)
+            _set_scale_visibility(out_layer, layer_def)
+            root_node = QgsLayerTreeGroup()
+            node = root_node.addLayer(out_layer)
+            node.setItemVisibilityChecked(bool(layer_def.get("visibility", True)))
+            node.setExpanded(bool(layer_def.get("expanded", False)))
+            nodes_to_export = [node]
         elif layer_type == 'CIMAnnotationLayer':
             print("Annotation layers are unsupported")
-            return # Exit for unsupported types
+            return
         else:
             raise Exception(f"Unhandled layer type: {layer_type}")
 
-        # The following two calls are now handled by the export function,
-        # ensuring metadata and scale visibility are part of the exported QLR tree.
-        _set_metadata(out_layer, layer_def)
-        _set_scale_visibility(out_layer, layer_def)
-
-        # Use export function to correctly handle visibility.
-        _export_qlr_with_visibility(out_layer, layer_def, out_file)
+        # Export the QLR including the layer tree node(s)
+        if nodes_to_export:
+            ok, error_message = QgsLayerDefinition.exportLayerDefinition(out_file, nodes_to_export)
+            if not ok:
+                raise RuntimeError(f"Failed to export layer definition: {error_message}")
 
         print(f"Successfully converted {in_lyrx} to {out_file}")
     except Exception as e:
         print(f"Error converting LYRX: {e}")
         raise
     finally:
+        project.clear()  # Clear the project instance for the next run
         if manage_qgs:
             qgs.exitQgis()
+
+def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, project):
+    """
+    Recursively processes a group layer and its children.
+    """
+    group_name = group_layer_def.get('name', 'group')
+    group_node = QgsLayerTreeGroup(group_name)
+
+    # Set visibility and expanded state for the group itself
+    group_node.setItemVisibilityChecked(bool(group_layer_def.get("visibility", True)))
+    group_node.setExpanded(bool(group_layer_def.get("expanded", False)))
+
+    # Process child layers using the correct key: "layers"
+    for member_uri in group_layer_def.get("layers", []):
+        member_def = next((ld for ld in lyrx_json.get("layerDefinitions", []) if ld.get("uRI") == member_uri), None)
+        if not member_def:
+            continue
+
+        layer_type = member_def.get("type")
+        if layer_type == "CIMGroupLayer":
+            child_group = _convert_group_layer(in_folder, member_def, lyrx_json, out_file, project)
+            group_node.addChildNode(child_group)
+        elif layer_type == "CIMFeatureLayer":
+            child_layer = _convert_feature_layer(in_folder, member_def, out_file, project)
+            _set_metadata(child_layer, member_def)
+            _set_scale_visibility(child_layer, member_def)
+            node = group_node.addLayer(child_layer)
+            if node:
+                node.setItemVisibilityChecked(bool(member_def.get("visibility", True)))
+                node.setExpanded(bool(member_def.get("expanded", False)))
+
+        elif layer_type == 'CIMRasterLayer':
+            child_layer = _convert_raster_layer(in_folder, member_def, out_file, project)
+            _set_metadata(child_layer, member_def)
+            _set_scale_visibility(child_layer, member_def)
+            node = group_node.addLayer(child_layer)
+            if node:
+                node.setItemVisibilityChecked(bool(member_def.get("visibility", True)))
+                node.setExpanded(bool(member_def.get("expanded", False)))
+
+    return group_node
