@@ -1,4 +1,5 @@
 from colorsys import hsv_to_rgb
+from typing import List, Dict, Any
 
 from qgis.PyQt.QtGui import QColor
 
@@ -131,3 +132,88 @@ def _convert_lab_to_rgb(L, a, b, alpha):
     except Exception:
         # Return black if conversion fails
         return QColor(0, 0, 0, 255)
+    
+def extract_colors_from_ramp(color_ramp: Dict[str, Any]) -> List[QColor]:
+        """
+        Extract colors from an ArcGIS color ramp definition.
+        Handles both single segment and multi-segment color ramps.
+        """
+        colors = []
+        
+        if not color_ramp:
+            return colors
+        
+        # Handle multipart color ramps
+        color_ramps = color_ramp.get("colorRamps", [])
+        
+        if color_ramps:
+            # Get the first color from the first ramp
+            if color_ramps[0].get("fromColor"):
+                first_color = parse_color(color_ramps[0]["fromColor"])
+                if first_color:
+                    colors.append(first_color)
+            
+            # Get intermediate colors (to colors from each ramp except the last)
+            for ramp in color_ramps[:-1]:
+                if ramp.get("toColor"):
+                    color = parse_color(ramp["toColor"])
+                    if color:
+                        colors.append(color)
+            
+            # Get the final color from the last ramp
+            if color_ramps[-1].get("toColor"):
+                last_color = parse_color(color_ramps[-1]["toColor"])
+                if last_color:
+                    colors.append(last_color)
+
+        return colors
+
+def create_interpolated_colors(base_colors: List[QColor], num_needed: int) -> List[QColor]:
+        """
+        Create interpolated colors from a list of base colors.
+        """
+        if num_needed <= len(base_colors):
+            return base_colors[:num_needed]
+        
+        if len(base_colors) < 2:
+            # Can't interpolate with less than 2 colors
+            return base_colors * num_needed  # Repeat the colors
+        
+        result_colors = []
+        segments = len(base_colors) - 1  # Number of segments between colors
+        colors_per_segment = (num_needed - 1) / segments
+        
+        for segment in range(segments):
+            start_color = base_colors[segment]
+            end_color = base_colors[segment + 1]
+            
+            # Calculate how many colors this segment should contribute
+            if segment < segments - 1:
+                segment_colors = int(colors_per_segment)
+            else:
+                # Last segment gets any remaining colors
+                segment_colors = num_needed - len(result_colors) - 1
+            
+            # Create interpolated colors for this segment
+            for i in range(segment_colors):
+                ratio = i / max(1, segment_colors)
+                interpolated = interpolate_single_color(start_color, end_color, ratio)
+                result_colors.append(interpolated)
+        
+        # Always add the final color
+        result_colors.append(base_colors[-1])
+        
+        # Ensure we have exactly the right number of colors
+        while len(result_colors) < num_needed:
+            result_colors.append(base_colors[-1])
+        
+        return result_colors[:num_needed]
+
+
+def interpolate_single_color(color1: QColor, color2: QColor, ratio: float) -> QColor:
+        """Interpolate between two colors."""
+        r = int(color1.red() + (color2.red() - color1.red()) * ratio)
+        g = int(color1.green() + (color2.green() - color1.green()) * ratio)
+        b = int(color1.blue() + (color2.blue() - color1.blue()) * ratio)
+        a = int(color1.alpha() + (color2.alpha() - color1.alpha()) * ratio)
+        return QColor(r, g, b, a)

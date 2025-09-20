@@ -32,17 +32,19 @@ from qgis.core import (
     QgsClassificationRange,
     QgsSimpleMarkerSymbolLayer,
     QgsSimpleFillSymbolLayer,
-    QgsSimpleLineSymbolLayer
+    QgsSimpleLineSymbolLayer,
+    QgsWkbTypes
 
 )
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtCore import Qt
 from arc_to_q.converters.vector.symbols import SymbolFactory
-from arc_to_q.converters.utils import parse_color
+from arc_to_q.converters.utils import (
+    parse_color, extract_colors_from_ramp, create_interpolated_colors
+)
 from .expression_translator import translate_arcade_expression
 
 logger = logging.getLogger(__name__)
-
 
 class RendererCreationError(Exception):
     """Raised when renderer creation fails."""
@@ -404,7 +406,6 @@ class VectorRenderer:
         """
         Create a QGIS graduated renderer from a CIMClassBreaksRenderer definition.
         """
-        # --- START: Consolidated Logic ---
         expression_string = None
         is_expression = "valueExpressionInfo" in renderer_def
 
@@ -420,7 +421,6 @@ class VectorRenderer:
         # Only validate the field if it's not a complex expression
         if not is_expression and not self._validate_field_exists(layer, expression_string):
             raise RendererCreationError(f"Field '{expression_string}' not found in layer '{layer.name()}'")
-        # --- END: Consolidated Logic ---
 
         if renderer_def.get("classBreakType") == "UnclassedColor":
             # Pass the processed expression_string to the helper function
@@ -457,42 +457,6 @@ class VectorRenderer:
         self._apply_common_renderer_properties(renderer, renderer_def)
         return renderer
 
-    def _extract_colors_from_ramp(self, color_ramp: Dict[str, Any]) -> List[QColor]:
-        """
-        Extract colors from an ArcGIS color ramp definition.
-        Handles both single segment and multi-segment color ramps.
-        """
-        colors = []
-        
-        if not color_ramp:
-            return colors
-        
-        # Handle multipart color ramps
-        color_ramps = color_ramp.get("colorRamps", [])
-        
-        if color_ramps:
-            # Get the first color from the first ramp
-            if color_ramps[0].get("fromColor"):
-                first_color = parse_color(color_ramps[0]["fromColor"])
-                if first_color:
-                    colors.append(first_color)
-            
-            # Get intermediate colors (to colors from each ramp except the last)
-            for ramp in color_ramps[:-1]:
-                if ramp.get("toColor"):
-                    color = parse_color(ramp["toColor"])
-                    if color:
-                        colors.append(color)
-            
-            # Get the final color from the last ramp
-            if color_ramps[-1].get("toColor"):
-                last_color = parse_color(color_ramps[-1]["toColor"])
-                if last_color:
-                    colors.append(last_color)
-        
-        logger.info(f"Extracted {len(colors)} colors from color ramp")
-        return colors
-
     def _color_already_exists(self, color: QColor, color_list: List[QColor]) -> bool:
         """Check if a color already exists in the list (comparing RGB values)."""
         for existing_color in color_list:
@@ -501,55 +465,6 @@ class VectorRenderer:
                 color.blue() == existing_color.blue()):
                 return True
         return False
-
-    def _create_interpolated_colors(self, base_colors: List[QColor], num_needed: int) -> List[QColor]:
-        """
-        Create interpolated colors from a list of base colors.
-        """
-        if num_needed <= len(base_colors):
-            return base_colors[:num_needed]
-        
-        if len(base_colors) < 2:
-            # Can't interpolate with less than 2 colors
-            return base_colors * num_needed  # Repeat the colors
-        
-        result_colors = []
-        segments = len(base_colors) - 1  # Number of segments between colors
-        colors_per_segment = (num_needed - 1) / segments
-        
-        for segment in range(segments):
-            start_color = base_colors[segment]
-            end_color = base_colors[segment + 1]
-            
-            # Calculate how many colors this segment should contribute
-            if segment < segments - 1:
-                segment_colors = int(colors_per_segment)
-            else:
-                # Last segment gets any remaining colors
-                segment_colors = num_needed - len(result_colors) - 1
-            
-            # Create interpolated colors for this segment
-            for i in range(segment_colors):
-                ratio = i / max(1, segment_colors)
-                interpolated = self._interpolate_single_color(start_color, end_color, ratio)
-                result_colors.append(interpolated)
-        
-        # Always add the final color
-        result_colors.append(base_colors[-1])
-        
-        # Ensure we have exactly the right number of colors
-        while len(result_colors) < num_needed:
-            result_colors.append(base_colors[-1])
-        
-        return result_colors[:num_needed]
-
-    def _interpolate_single_color(self, color1: QColor, color2: QColor, ratio: float) -> QColor:
-        """Interpolate between two colors."""
-        r = int(color1.red() + (color2.red() - color1.red()) * ratio)
-        g = int(color1.green() + (color2.green() - color1.green()) * ratio)
-        b = int(color1.blue() + (color2.blue() - color1.blue()) * ratio)
-        a = int(color1.alpha() + (color2.alpha() - color1.alpha()) * ratio)
-        return QColor(r, g, b, a)
 
     # Add this helper method to extract colors from symbol definitions
     def _extract_color_from_symbol_def(self, symbol_def: Dict[str, Any]) -> Optional[QColor]:
@@ -588,7 +503,7 @@ class VectorRenderer:
 
             # Extract the color ramp from the visual variable
             arc_color_ramp = color_var.get("colorRamp", {})
-            colors = self._extract_colors_from_ramp(arc_color_ramp)
+            colors = extract_colors_from_ramp(arc_color_ramp)
             
             if len(colors) < 2:
                 # Fallback to simple two-color gradient
@@ -600,7 +515,7 @@ class VectorRenderer:
             range_width = (max_value - min_value) / num_ranges
             
             # Interpolate colors for all ranges
-            interpolated_colors = self._create_interpolated_colors(colors, num_ranges)
+            interpolated_colors = create_interpolated_colors(colors, num_ranges)
             
             # Get base symbol from the first break
             base_symbol_def = renderer_def.get("breaks", [{}])[0].get("symbol", {})
@@ -736,7 +651,6 @@ class VectorRenderer:
     
     def _create_default_symbol(self, layer: QgsVectorLayer):
         """Create a default symbol based on layer geometry type."""
-        from qgis.core import QgsWkbTypes
         
         geom_type = layer.geometryType()
         

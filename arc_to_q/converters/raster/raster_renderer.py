@@ -6,6 +6,8 @@ from pathlib import Path
 from qgis.core import QgsRasterLayer, QgsRasterDataProvider
 from arc_to_q.converters.raster.color_mapping import create_classified_renderer
 from arc_to_q.converters.raster.resampling import get_resampling_method
+from arc_to_q.converters.raster.stretch_renderer import create_stretched_renderer
+
 
 def create_raster_layer(abs_uri, layer_name):
     """Create and validate a QGIS raster layer.
@@ -51,11 +53,17 @@ def apply_raster_symbology(qgis_layer, layer_def):
     if not colorizer_def:
         return
     
+    renderer = None
+    colorizer_type = colorizer_def.get('type')
+    
     # Apply color classification if available
-    if colorizer_def.get('type') == 'CIMRasterClassifyColorizer':
+    if colorizer_type == 'CIMRasterClassifyColorizer':
         renderer = create_classified_renderer(qgis_layer, colorizer_def)
-        if renderer:
-            qgis_layer.setRenderer(renderer)
+    elif colorizer_type == 'CIMRasterStretchColorizer':
+        renderer = create_stretched_renderer(qgis_layer, colorizer_def)
+    
+    if renderer:
+        qgis_layer.setRenderer(renderer)
     
     # Set resampling method on the raster layer's data provider
     resampling = get_resampling_method(colorizer_def)
