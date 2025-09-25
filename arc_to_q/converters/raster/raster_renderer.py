@@ -9,39 +9,6 @@ from arc_to_q.converters.raster.resampling import get_resampling_method
 from arc_to_q.converters.raster.stretch_renderer import create_stretched_renderer
 
 
-def create_raster_layer(abs_uri, layer_name):
-    """Create and validate a QGIS raster layer.
-    
-    Args:
-        abs_uri (str): Absolute path to the raster file.
-        layer_name (str): Name for the QGIS layer.
-        
-    Returns:
-        QgsRasterLayer: The created raster layer.
-        
-    Raises:
-        RuntimeError: If the layer cannot be loaded.
-    """
-    print(f"Attempting to load raster from: {abs_uri}")
-    
-    qgis_layer = QgsRasterLayer(abs_uri, layer_name)
-    if not qgis_layer.isValid():
-        error_msg = f"Failed to load raster layer: {abs_uri}"
-        if qgis_layer.error().summary():
-            error_msg += f"\nError: {qgis_layer.error().summary()}"
-        
-        # Additional debugging info
-        if os.path.exists(abs_uri):
-            error_msg += f"\nFile exists but GDAL cannot read it. Check file format/permissions."
-        else:
-            error_msg += f"\nFile does not exist at: {abs_uri}"
-        
-        print(error_msg)
-        raise RuntimeError(error_msg)
-    
-    return qgis_layer
-
-
 def apply_raster_symbology(qgis_layer, layer_def):
     """Apply symbology and rendering settings to a raster layer.
     
