@@ -396,35 +396,16 @@ def create_raster_layer(abs_uri, layer_name):
 
 def _convert_raster_layer(in_folder, layer_def, out_file, project):
     """Create a QgsRasterLayer from a CIMRasterLayer layer definition."""
-    layer_name = layer_def.get("name", "Raster")
-
-    # ArcGIS CIM for rasters typically stores a dataConnection directly on the layer.
-    # Fallback in case it's nested (some exports).
-    data_connection = (
-        layer_def.get("dataConnection")
-        or layer_def.get("raster", {}).get("dataConnection")
-        or {}
-    )
-    if not data_connection:
-        raise RuntimeError("Raster layer missing 'dataConnection'.")
-
-    # No definition query for rasters
+    data_connection = layer_def.get('dataConnection', {})
     (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
+    layer_name = layer_def.get('name', os.path.basename(abs_uri))
 
-    # Load with GDAL provider
-    rlayer = QgsRasterLayer(abs_uri, layer_name, "gdal")
-    if not rlayer.isValid():
-        raise RuntimeError(f"Raster layer failed to load: {layer_name} {abs_uri}")
+    rlayer = create_raster_layer(abs_uri, layer_name)
+   
+    apply_raster_symbology(rlayer, layer_def)
+    switch_to_relative_path(rlayer, rel_uri)
 
-    # Prefer relative path in the saved QLR
-    # setDataSource is available in QGIS 3 for generic map layers; if unavailable,
-    # you can remove this line to keep absolute paths in the QLR.
-    try:
-        rlayer.setDataSource(rel_uri, rlayer.name(), rlayer.providerType())
-    except Exception:
-        print("Warning: Could not set relative path for raster layer; using absolute path in QLR.")
 
-    # (Optional) raster symbology mapping can be added here in a future enhancement
     project.addMapLayer(rlayer, False)
     return rlayer
 
@@ -509,7 +490,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             _set_metadata(out_layer, layer_def)
             _set_scale_visibility(out_layer, layer_def)
             _export_qlr_with_visibility(out_layer, layer_def, out_file)
-            
+
         elif layer_type == 'CIMAnnotationLayer':
             print("Annotation layers are unsupported")
             return
