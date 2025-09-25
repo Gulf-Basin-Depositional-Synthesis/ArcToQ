@@ -266,4 +266,3 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
 
     visibility = layer_def.get("labelVisibility", False)
     layer.setLabelsEnabled(visibility)
-
