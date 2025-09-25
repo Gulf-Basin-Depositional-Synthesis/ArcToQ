@@ -491,6 +491,9 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
 
     try:
         lyrx = _open_lyrx(in_lyrx)
+        if len(lyrx["layers"]) != 1:
+            raise Exception(f"Unexpected number of layers found: {len(lyrx['layers'])}")
+
         layer_uri = lyrx["layers"][0]
         layer_def = next((ld for ld in lyrx.get("layerDefinitions", []) if ld.get("uRI") == layer_uri), {})
         
