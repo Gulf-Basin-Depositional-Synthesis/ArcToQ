@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 
 from qgis.core import (
     QgsApplication,
@@ -345,8 +346,17 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
         layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
         if not layer.isValid():
             raise RuntimeError(f"Layer failed to load: {layer_name} {abs_uri}")
-        # Swap to relative URI for QLR
-        layer.setDataSource(rel_uri, layer.name(), layer.providerType())
+        
+        # Attempt to switch to relative URI for portable QLR files
+        # This is especially important for network drives where path resolution can be problematic
+        test_layer = QgsVectorLayer(rel_uri, f"test_{layer_name}", "ogr")
+        if test_layer.isValid():
+            # Relative path works, switch the main layer to use it
+            layer.setDataSource(rel_uri, layer.name(), layer.providerType())
+            if not layer.isValid():
+                # If switching to relative path breaks the layer, recreate with absolute path
+                layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
+        # If relative path doesn't work, keep using absolute path (no action needed)
 
     # Set other layer properties
     _set_display_field(layer, layer_def)
@@ -357,7 +367,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
     set_labels(layer, layer_def)
 
     if not layer.isValid():
-        raise RuntimeError(f"Layer became invalid after setting relative path or query: {layer_name}")
+        raise RuntimeError(f"Layer became invalid after setting properties: {layer_name}")
 
     project.addMapLayer(layer, False)
     return layer
@@ -394,42 +404,330 @@ def create_raster_layer(abs_uri, layer_name):
     
     return rlayer
 
+def _parse_xml_dataconnection(xml_string):
+    """
+    Parses XML data connection strings to extract raster path and dataset.
+    Handles various XML formats including complex nested structures.
+    """
+    print(f"    Attempting to parse XML (length: {len(xml_string)})")
+    print(f"    First 300 chars: {xml_string[:300]}")
+    
+    # Method 1: Standard CIMDataConnection format
+    ws_match = re.search(
+        r"<WorkspaceConnectionString>DATABASE=([^<]+)</WorkspaceConnectionString>",
+        xml_string
+    )
+    dataset_match = re.search(
+        r"<Dataset>([^<]+)</Dataset>",
+        xml_string
+    )
+    
+    if ws_match and dataset_match:
+        path = ws_match.group(1).strip()
+        dataset = dataset_match.group(1).strip()
+        
+        if path.endswith(';'):
+            path = path[:-1]
+        
+        print(f"    Parsed using standard format:")
+        print(f"      Path: {path}")
+        print(f"      Dataset: {dataset}")
+        
+        return {
+            "workspaceConnectionString": f"DATABASE={path}",
+            "dataset": dataset,
+            "workspaceFactory": "Raster",
+            "datasetType": "esriDTRasterDataset"
+        }
+    
+    # Method 2: Complex nested XML (XmlRasterDataset with GeometricFunction)
+    # This is the format in your problematic file
+    # Look for RasterDatasetName which contains the actual file info
+    if "XmlRasterDataset" in xml_string and "GeometricFunction" in xml_string:
+        print(f"    Detected XmlRasterDataset with GeometricFunction")
+        
+        # Look for the PathName in the nested structure
+        path_match = re.search(r"<PathName>([^<]+)</PathName>", xml_string)
+        
+        # For the dataset name, we need to look in the RasterDatasetName section
+        # The actual filename is in a <Name> tag within RasterDatasetName
+        # Use a more specific pattern to avoid matching "Geometric Function"
+        
+        # First try to find the name within RasterDatasetName context
+        raster_section = re.search(
+            r"RasterDatasetName[^>]*>.*?<Name>([^<]+\.(?:png|tif|tiff|jpg|jpeg|img|sid|ecw))</Name>",
+            xml_string,
+            re.IGNORECASE | re.DOTALL
+        )
+        
+        if not raster_section:
+            # Try alternative: look for Name tag that contains an image extension
+            raster_section = re.search(
+                r"<Name>([^<]+\.(?:png|tif|tiff|jpg|jpeg|img|sid|ecw))</Name>",
+                xml_string,
+                re.IGNORECASE
+            )
+        
+        if path_match and raster_section:
+            path = path_match.group(1).strip()
+            dataset = raster_section.group(1).strip()
+            
+            print(f"    Parsed XmlRasterDataset format:")
+            print(f"      Path: {path}")
+            print(f"      Dataset: {dataset}")
+            
+            return {
+                "workspaceConnectionString": f"DATABASE={path}",
+                "dataset": dataset,
+                "workspaceFactory": "Raster",
+                "datasetType": "esriDTRasterDataset"
+            }
+    
+    # Method 3: Look for PathName and any Name tag (but skip "Geometric Function")
+    path_match = re.search(r"<PathName>([^<]+)</PathName>", xml_string)
+    
+    # Find all <Name> tags and filter out function names
+    name_matches = re.findall(r"<Name>([^<]+)</Name>", xml_string)
+    
+    dataset = None
+    for name in name_matches:
+        # Skip function names and look for actual filenames
+        if not any(word in name.lower() for word in ['function', 'geometric', 'transform']):
+            # Check if it looks like a filename (has extension)
+            if '.' in name and any(name.lower().endswith(ext) for ext in ['.png', '.tif', '.tiff', '.jpg', '.jpeg', '.img', '.sid', '.ecw']):
+                dataset = name.strip()
+                print(f"    Found dataset name: {dataset}")
+                break
+    
+    if path_match and dataset:
+        path = path_match.group(1).strip()
+        
+        print(f"    Parsed using PathName/filtered Name format:")
+        print(f"      Path: {path}")
+        print(f"      Dataset: {dataset}")
+        
+        return {
+            "workspaceConnectionString": f"DATABASE={path}",
+            "dataset": dataset,
+            "workspaceFactory": "Raster",
+            "datasetType": "esriDTRasterDataset"
+        }
+    
+    # Method 4: Last resort - look for path and any image filename in the XML
+    path = None
+    dataset = None
+    
+    # Try to find a path
+    path_patterns = [
+        r"<PathName>([^<]+)</PathName>",
+        r"DATABASE=([^;<\"]+)",
+        r"Workspace\s*=\s*([^;<\"]+)",
+    ]
+    
+    for pattern in path_patterns:
+        match = re.search(pattern, xml_string, re.IGNORECASE)
+        if match:
+            path = match.group(1).strip()
+            if ';' in path:
+                path = path.split(';')[0]
+            print(f"    Found path using pattern '{pattern}': {path}")
+            break
+    
+    # Look for any string that looks like an image filename
+    # This regex looks for strings that have image extensions
+    file_pattern = r">([^<>]*\.(?:png|tif|tiff|jpg|jpeg|img|sid|ecw))<"
+    file_matches = re.findall(file_pattern, xml_string, re.IGNORECASE)
+    
+    if file_matches:
+        # Take the last match as it's more likely to be the actual filename
+        # (earlier matches might be in comments or examples)
+        dataset = file_matches[-1].strip()
+        print(f"    Found dataset using file pattern: {dataset}")
+    
+    if path and dataset:
+        # Clean up Windows paths
+        path = path.replace('\\', '/')
+        
+        print(f"    Successfully parsed using fallback patterns:")
+        print(f"      Path: {path}")
+        print(f"      Dataset: {dataset}")
+        
+        return {
+            "workspaceConnectionString": f"DATABASE={path}",
+            "dataset": dataset,
+            "workspaceFactory": "Raster",
+            "datasetType": "esriDTRasterDataset"
+        }
+    
+    # If all methods fail, log what we found
+    print(f"    ERROR: Could not parse XML")
+    print(f"      Path found: {path}")
+    print(f"      Dataset found: {dataset}")
+    print(f"      All Name tags found: {name_matches if 'name_matches' in locals() else 'None'}")
+    print(f"    Last 300 chars: {xml_string[-300:]}")
+    
+    return None
+
+
 def _convert_raster_layer(in_folder, layer_def, out_file, project):
     """Create a QgsRasterLayer from a CIMRasterLayer layer definition."""
+    
     layer_name = layer_def.get("name", "Raster")
-
-    # ArcGIS CIM for rasters typically stores a dataConnection directly on the layer.
-    # Fallback in case it's nested (some exports).
-    data_connection = (
-        layer_def.get("dataConnection")
-        or layer_def.get("raster", {}).get("dataConnection")
-        or {}
-    )
+    print(f"Converting raster layer: {layer_name}")
+    
+    # Get the data connection
+    data_connection = layer_def.get("dataConnection")
+    
     if not data_connection:
-        raise RuntimeError("Raster layer missing 'dataConnection'.")
-
-    # No definition query for rasters
-    (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
-
-    # Load with GDAL provider
-    rlayer = QgsRasterLayer(abs_uri, layer_name, "gdal")
-    if not rlayer.isValid():
-        raise RuntimeError(f"Raster layer failed to load: {layer_name} {abs_uri}")
-
-    # Prefer relative path in the saved QLR
-    # setDataSource is available in QGIS 3 for generic map layers; if unavailable,
-    # you can remove this line to keep absolute paths in the QLR.
+        raise RuntimeError(f"Raster layer '{layer_name}' missing 'dataConnection'.")
+    
+    # Handle different forms of data_connection
+    
+    # Case 1: data_connection is a string (XML)
+    if isinstance(data_connection, str):
+        print(f"  dataConnection is XML string, parsing...")
+        parsed = _parse_xml_dataconnection(data_connection)
+        if parsed:
+            data_connection = parsed
+        else:
+            # Try to provide more helpful error
+            print(f"  Could not parse XML data connection")
+            print(f"  XML preview: {data_connection[:500]}")
+            raise NotImplementedError(f"Could not parse XML data connection for layer: {layer_name}")
+    
+    # Case 2: data_connection is a dict
+    elif isinstance(data_connection, dict):
+        print(f"  dataConnection is dict with keys: {list(data_connection.keys())}")
+        
+        # Check if the dataset field contains XML
+        dataset_value = data_connection.get('dataset', '')
+        
+        # Check if dataset looks like XML (contains tags and namespaces)
+        if isinstance(dataset_value, str) and ('<' in dataset_value or 'xmlns' in dataset_value or 'xsi:type' in dataset_value):
+            print(f"  Found XML in 'dataset' field, parsing...")
+            print(f"  XML length: {len(dataset_value)}")
+            
+            # The dataset field contains XML - parse it
+            parsed = _parse_xml_dataconnection(dataset_value)
+            if parsed:
+                # Keep the workspace info from the parent dict if available
+                if 'workspaceConnectionString' in data_connection:
+                    # Use the parent's workspace if the parsed one doesn't have it
+                    if not parsed.get('workspaceConnectionString') or parsed['workspaceConnectionString'] == 'DATABASE=':
+                        parsed['workspaceConnectionString'] = data_connection['workspaceConnectionString']
+                
+                data_connection = parsed
+                print(f"  Replaced data_connection with parsed XML")
+            else:
+                # Parsing failed, but we might still have valid data in the parent dict
+                # Check if we have the other required fields
+                if 'workspaceConnectionString' in data_connection:
+                    print(f"  WARNING: Could not parse XML in dataset field")
+                    print(f"  Will attempt to extract dataset name from XML")
+                    
+                    # Try to extract just the dataset name from the XML
+                    name_match = re.search(r">([^<>]+\.(?:png|tif|tiff|jpg|jpeg|img|sid|ecw))<", dataset_value, re.IGNORECASE)
+                    if name_match:
+                        dataset_name = name_match.group(1).strip()
+                        print(f"  Extracted dataset name: {dataset_name}")
+                        data_connection['dataset'] = dataset_name
+                    else:
+                        # Last resort - look for the layer name with an image extension
+                        possible_name = f"{layer_name}.png"
+                        print(f"  Could not extract dataset name, using: {possible_name}")
+                        data_connection['dataset'] = possible_name
+                else:
+                    raise NotImplementedError(f"Could not parse XML in dataset field and no workspace info available")
+    
+    # Case 3: Unexpected type
+    else:
+        raise RuntimeError(f"Unexpected data_connection type: {type(data_connection)}")
+    
+    # Normalize dictionary keys (handle both lowercase and capitalized)
+    normalized = {}
+    for key, value in data_connection.items():
+        if key == 'WorkspaceConnectionString':
+            normalized['workspaceConnectionString'] = value
+        elif key == 'Dataset':
+            normalized['dataset'] = value
+        elif key == 'WorkspaceFactory':
+            normalized['workspaceFactory'] = value
+        elif key == 'DatasetType':
+            normalized['datasetType'] = value
+        else:
+            normalized[key] = value
+    data_connection = normalized
+    
+    # Validate required keys
+    required_keys = ['workspaceConnectionString', 'dataset', 'workspaceFactory']
+    missing_keys = [k for k in required_keys if k not in data_connection]
+    
+    if missing_keys:
+        raise RuntimeError(f"data_connection missing required keys: {missing_keys}\nAvailable keys: {list(data_connection.keys())}")
+    
+    # Final check: ensure dataset is not XML
+    if '<' in str(data_connection.get('dataset', '')):
+        raise RuntimeError(f"dataset field still contains XML after parsing: {data_connection['dataset'][:100]}...")
+    
+    print(f"  Final data_connection: {data_connection}")
+    
+    # Now call _parse_source with the cleaned data_connection
+    try:
+        (abs_uri, rel_uri), join_info = _parse_source(in_folder, data_connection, "", out_file)
+    except Exception as e:
+        import traceback
+        print(f"  Error in _parse_source: {e}")
+        traceback.print_exc()
+        raise RuntimeError(f"Failed to parse raster source: {e}")
+    
+    print(f"  Absolute URI: {abs_uri}")
+    print(f"  Relative URI: {rel_uri}")
+    
+    # Suppress GDAL warnings
+    gdal_log_file = os.environ.get('CPL_LOG')
+    os.environ['CPL_LOG'] = os.devnull
+    
+    try:
+        # Create the raster layer
+        rlayer = QgsRasterLayer(abs_uri, layer_name, "gdal")
+        
+        if not rlayer.isValid():
+            # Detailed error reporting
+            if os.path.exists(abs_uri):
+                error_msg = f"Raster file exists but GDAL cannot open it: {abs_uri}"
+            else:
+                error_msg = f"Raster file not found: {abs_uri}"
+                parent = os.path.dirname(abs_uri)
+                if os.path.exists(parent):
+                    try:
+                        files = [f for f in os.listdir(parent) if f.endswith(('.png', '.tif', '.jpg'))][:5]
+                        error_msg += f"\nImage files in directory: {files}"
+                    except:
+                        pass
+            
+            raise RuntimeError(f"Raster layer failed to load: {layer_name}\n{error_msg}")
+        
+    finally:
+        # Restore GDAL logging
+        if gdal_log_file:
+            os.environ['CPL_LOG'] = gdal_log_file
+        else:
+            os.environ.pop('CPL_LOG', None)
+    
+    # Set relative path
     try:
         rlayer.setDataSource(rel_uri, rlayer.name(), rlayer.providerType())
     except Exception:
-        print("Warning: Could not set relative path for raster layer; using absolute path in QLR.")
-
+        print(f"  Warning: Could not set relative path for raster layer")
+    
+    # Apply symbology
     apply_raster_symbology(rlayer, layer_def)
-    switch_to_relative_path(rlayer, rel_uri)
-
+    
+    # Add to project
     project.addMapLayer(rlayer, False)
+    print(f"  Successfully converted raster layer: {layer_name}")
+    
     return rlayer
-
 
 def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> None:
     """
