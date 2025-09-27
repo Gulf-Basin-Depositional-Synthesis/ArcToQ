@@ -346,16 +346,16 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
         if not layer.isValid():
             raise RuntimeError(f"Layer failed to load: {layer_name} {abs_uri}")
         
-        # Try to set relative URI, but validate it works
-        print(f"Attempting to switch to relative path...")
-        
-        # Create a test layer with the relative URI to make sure it works
+        # Attempt to switch to relative URI for portable QLR files
+        # This is especially important for network drives where path resolution can be problematic
         test_layer = QgsVectorLayer(rel_uri, f"test_{layer_name}", "ogr")
         if test_layer.isValid():
+            # Relative path works, switch the main layer to use it
             layer.setDataSource(rel_uri, layer.name(), layer.providerType())
             if not layer.isValid():
-                # Recreate with absolute path
+                # If switching to relative path breaks the layer, recreate with absolute path
                 layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
+        # If relative path doesn't work, keep using absolute path (no action needed)
 
     # Set other layer properties
     _set_display_field(layer, layer_def)
