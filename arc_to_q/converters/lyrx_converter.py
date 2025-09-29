@@ -483,7 +483,9 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         out_folder (str, optional): Folder to save the output .qlr file. If not provided,
             the output will be saved in the same folder as the input .lyrx file.
         qgs (QgsApplication, optional): An initialized QgsApplication instance. If not provided,
-            a new instance will be created and initialized within this function.
+            a new instance will be created and initialized within this function. Even though we
+            might not pass anything to the instance, we still need it for other QGIS objects
+            to be instantiated and function properly.
     """
     print(f"Converting {in_lyrx}...")
     if not out_folder:
@@ -496,6 +498,8 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         qgs = QgsApplication([], False)
         qgs.initQgis()
 
+    # Even though we might not pass anything to the instance, we still need it for other QGIS
+    # objects to be instantiated and function properly, particularly wrt symbology.
     project = QgsProject.instance()
 
     try:
