@@ -62,8 +62,6 @@ if __name__ == "__main__":
     ]
 
     layers = _get_lyrx_in_folder(r'D:\GBDS\Map_Layers', False)
-    print(f"Found {len(layers)} .lyrx files.")
-
 
     qgs = QgsApplication([], False)
     qgs.initQgis()

@@ -530,7 +530,6 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             might not pass anything to the instance, we still need it for other QGIS objects
             to be instantiated and function properly.
     """
-    print(f"Converting {in_lyrx}...")
     if not out_folder:
         out_folder = os.path.dirname(in_lyrx)
     in_folder = os.path.abspath(os.path.dirname(in_lyrx))
@@ -582,8 +581,6 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             ok, error_message = QgsLayerDefinition.exportLayerDefinition(out_file, nodes_to_export)
             if not ok:
                 raise RuntimeError(f"Failed to export layer definition: {error_message}")
-
-        print(f"Successfully converted {in_lyrx} to {out_file}")
     except Exception as e:
         print(f"Error converting LYRX: {e}")
         raise
