@@ -15,6 +15,21 @@ from qgis.core import (
 from arc_to_q.converters.lyrx_converter import convert_lyrx
 
 
+def _get_lyrx_in_folder(folder, recursive=True):
+    """Get all .lyrx files in a folder."""
+    lyrx_files = []
+    if recursive:
+        for root, dirs, files in os.walk(folder):
+            for file in files:
+                if file.endswith('.lyrx'):
+                    lyrx_files.append(os.path.join(root, file))
+    else:
+        for file in os.listdir(folder):
+            if file.endswith('.lyrx'):
+                lyrx_files.append(os.path.join(folder, file))
+    return lyrx_files
+
+
 if __name__ == "__main__":
     output_folder = r'D:\GBDS\Map_Layers_QGIS'
 
@@ -29,12 +44,14 @@ if __name__ == "__main__":
     mag = r'D:\GBDS\Map_Layers\Basemap\Magnetic Anomaly.lyrx'
     tapestry = r'D:\GBDS\Map_Layers\Basemap\Tapestry of Time and Terrain.lyrx'
     utop_grid = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\64_SH\Unit Top (seismic + wells).lyrx'
+    test = r'D:\GBDS\Map_Layers\test.lyrx'
 
     layers = [
+        test,
         # well_lyrx,
         # plss_lyrx,
         # tops_all_wells,
-        mag,
+        # mag,
         # tapestry,
         # utop_grid,
         # ithk,
@@ -44,11 +61,16 @@ if __name__ == "__main__":
         # depo,
     ]
 
+    layers = _get_lyrx_in_folder(r'D:\GBDS\Map_Layers', False)
+    print(f"Found {len(layers)} .lyrx files.")
+
+
     qgs = QgsApplication([], False)
     qgs.initQgis()
 
     try:
         for lyrx in layers:
+            print(f"Processing {lyrx}...")
             convert_lyrx(lyrx, output_folder, qgs)
     except Exception as e:
         print(f"oops: {e}")
