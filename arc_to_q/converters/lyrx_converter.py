@@ -371,6 +371,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
     project.addMapLayer(layer, False)
     return layer
 
+
 def create_raster_layer(abs_uri, layer_name):
     """Create and validate a QGIS raster layer.
     

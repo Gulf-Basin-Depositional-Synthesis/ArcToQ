@@ -31,23 +31,23 @@ def _get_lyrx_in_folder(folder, recursive=True):
 
 
 if __name__ == "__main__":
-    output_folder = r'D:\GBDS\Map_Layers_QGIS'
+    output_folder = r'G:\Current_Database\Map_Layers_QGIS'
 
-    ithk = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\24_MM\Well Interval Thickness.lyrx'
-    cthk = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\54_PW\Well Carbonate Thickness.lyrx'
-    sthk = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\54_PW\Well Sandstone Thickness.lyrx'
-    utop = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\54_PW\Well Unit Top.lyrx'
-    depo = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\54_PW\Well Depofacies.lyrx'
-    tops_all_wells = r'D:\GBDS\Map_Layers\Tops for All Wells.lyrx'
-    well_lyrx = r'D:\GBDS\Map_Layers\GBDS Well.lyrx'
-    plss_lyrx = r'D:\GBDS\Map_Layers\Basemap\Public Land Survey System.lyrx'
-    mag = r'D:\GBDS\Map_Layers\Basemap\Magnetic Anomaly.lyrx'
-    tapestry = r'D:\GBDS\Map_Layers\Basemap\Tapestry of Time and Terrain.lyrx'
-    utop_grid = r'D:\GBDS\Map_Layers\Data_For_Each_Unit\64_SH\Unit Top (seismic + wells).lyrx'
-    test = r'D:\GBDS\Map_Layers\test.lyrx'
+    ithk = r'G:\Current_Database\Map_Layers\Data_For_Each_Unit\24_MM\Well Interval Thickness.lyrx'
+    cthk = r'G:\Current_Database\Map_Layers\Data_For_Each_Unit\54_PW\Well Carbonate Thickness.lyrx'
+    sthk = r'G:\Current_Database\Map_Layers\Data_For_Each_Unit\54_PW\Well Sandstone Thickness.lyrx'
+    utop = r'G:\Current_Database\Map_Layers\Data_For_Each_Unit\54_PW\Well Unit Top.lyrx'
+    depo = r'G:\Current_Database\Map_Layers\Data_For_Each_Unit\54_PW\Well Depofacies.lyrx'
+    tops_all_wells = r'G:\Current_Database\Map_Layers\Tops for All Wells.lyrx'
+    well_lyrx = r'G:\Current_Database\Map_Layers\GBDS Well.lyrx'
+    plss_lyrx = r'G:\Current_Database\Map_Layers\Basemap\Public Land Survey System.lyrx'
+    mag = r'G:\Current_Database\Map_Layers\Basemap\Magnetic Anomaly.lyrx'
+    tapestry = r'G:\Current_Database\Map_Layers\Basemap\Tapestry of Time and Terrain.lyrx'
+    utop_grid = r'G:\Current_Database\Map_Layers\Data_For_Each_Unit\64_SH\Unit Top (seismic + wells).lyrx'
+    pgeo = r'G:\Current_Database\Map_Layers\Data_For_Each_Unit\10_PS\Paleogeography.lyrx'
 
     layers = [
-        test,
+        pgeo,
         # well_lyrx,
         # plss_lyrx,
         # tops_all_wells,
@@ -61,7 +61,7 @@ if __name__ == "__main__":
         # depo,
     ]
 
-    layers = _get_lyrx_in_folder(r'D:\GBDS\Map_Layers', False)
+    # layers = _get_lyrx_in_folder(r'G:\Current_Database\Map_Layers', False)
 
     qgs = QgsApplication([], False)
     qgs.initQgis()
