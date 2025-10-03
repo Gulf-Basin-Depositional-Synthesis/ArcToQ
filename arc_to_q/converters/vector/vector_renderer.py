@@ -8,6 +8,8 @@ It handles the three main renderer types: Simple, Categorized (Unique Values), a
 from typing import Optional, List, Dict, Any, Union
 import logging
 import re
+import io
+import xml.etree.ElementTree as ET
 
 from qgis.core import (
     QgsVectorLayer,
@@ -33,7 +35,8 @@ from qgis.core import (
     QgsSimpleMarkerSymbolLayer,
     QgsSimpleFillSymbolLayer,
     QgsSimpleLineSymbolLayer,
-    QgsWkbTypes
+    QgsWkbTypes,
+    QgsFeatureRequest,
 
 )
 from qgis.PyQt.QtGui import QColor
@@ -43,7 +46,6 @@ from arc_to_q.converters.utils import (
     parse_color, extract_colors_from_ramp, create_interpolated_colors
 )
 from .expression_translator import translate_arcade_expression
-
 logger = logging.getLogger(__name__)
 
 class RendererCreationError(Exception):
@@ -62,7 +64,8 @@ class VectorRenderer:
     def __init__(self):
         self.symbol_factory = SymbolFactory()
     
-    def create_renderer(self, renderer_def: Dict[str, Any], layer: QgsVectorLayer) -> QgsFeatureRenderer:
+    def create_renderer(self, renderer_def: Dict[str, Any], layer: QgsVectorLayer,
+                        full_layer_def: Optional[Dict[str, Any]] = None) -> Optional[QgsFeatureRenderer]:
         """
         Create a QGIS renderer from an ArcGIS renderer definition.
         
@@ -88,10 +91,13 @@ class VectorRenderer:
             raise RendererCreationError("Renderer type is missing from definition")
         
         try:
+            renderer_type = renderer_def.get("type")
             if renderer_type == "CIMSimpleRenderer":
                 return self._create_single_symbol_renderer(renderer_def, layer)
             elif renderer_type == "CIMUniqueValueRenderer":
-                return self._create_categorized_or_rule_based_renderer(renderer_def, layer)
+                # --- THIS IS THE CORRECTED LINE ---
+                # We now pass the 'layer' object forward to the next function
+                return self._create_categorized_or_rule_based_renderer(renderer_def, layer, full_layer_def=full_layer_def)
             elif renderer_type == "CIMClassBreaksRenderer":
                 return self._create_graduated_renderer(renderer_def, layer)
             elif renderer_type == "CIMProportionalRenderer":
@@ -100,10 +106,8 @@ class VectorRenderer:
                 return self._create_heatmap_renderer(renderer_def, layer)
             else:
                 raise UnsupportedRendererError(f"Unsupported renderer type: {renderer_type}")
-                
         except Exception as e:
-            logger.error(f"Failed to create renderer of type {renderer_type}: {e}")
-            # Return a default single symbol renderer as fallback
+            print(f"Failed to create renderer of type {renderer_def.get('type')}: {e}")
             return self._create_default_renderer(layer)
     
     def _create_single_symbol_renderer(self, renderer_def: Dict[str, Any], 
@@ -136,24 +140,82 @@ class VectorRenderer:
         
         logger.info(f"Created single symbol renderer for layer '{layer.name()}'")
         return renderer
-    
+
     def _create_categorized_or_rule_based_renderer(self, renderer_def: Dict[str, Any],
-                                                   layer: QgsVectorLayer) -> QgsFeatureRenderer:
+                                                     layer: QgsVectorLayer,
+                                                     full_layer_def: Optional[Dict[str, Any]] = None) -> QgsFeatureRenderer:
         """
-        Decides whether to create a Bivariate, Expression-based, or standard Categorized renderer.
+        Creates either a categorized or rule-based renderer from a CIMUniqueValueRenderer definition.
+        A rule-based renderer is used if the ArcGIS renderer contains expression-based classes.
         """
-        authoring_info = renderer_def.get("authoringInfo", {})
-        if authoring_info.get("type") == "CIMBivariateRendererAuthoringInfo":
-            logger.info("Bivariate authoring info found, creating QGIS Bivariate-style Renderer.")
-            return self._create_bivariate_renderer(renderer_def, layer)
+        field_name = renderer_def.get("fields", [""])[0]
+        if any(class_item.get('expression') for group in renderer_def.get("groups", []) for class_item in group.get('classes', [])):
+            # Use a rule-based renderer if expressions are found
+            root_rule = QgsRuleBasedRenderer.Rule(None)
+            for group in renderer_def.get("groups", []):
+                for class_item in group.get('classes', []):
+                    expression = class_item.get('expression')
+                    if not expression:
+                        continue
 
-        if "valueExpressionInfo" in renderer_def:
-            logger.info("Expression found, creating QGIS Categorized Renderer with a CASE expression.")
-            return self._create_categorized_renderer_from_expression(renderer_def, layer)
+                    qgis_expression = translate_arcade_expression(expression)
+                    symbol_def = class_item.get("symbol", {}).get("symbol")
+                    if symbol_def:
+                        symbol = self.symbol_factory.create_symbol(symbol_def)
+                        rule = QgsRuleBasedRenderer.Rule(symbol, filterExp=qgis_expression, label=class_item.get("label"))
+                        root_rule.appendChild(rule)
 
+            renderer = QgsRuleBasedRenderer(root_rule)
         else:
-            logger.info("No expression or bivariate info, creating standard QGIS Categorized Renderer.")
-            return self._create_categorized_renderer(renderer_def, layer)
+            # Use a categorized renderer for simple value matching
+            renderer = QgsCategorizedSymbolRenderer(field_name)
+            categories = []
+            for group in renderer_def.get("groups", []):
+                for class_item in group.get('classes', []):
+                    values = class_item.get("values", [{}])
+                    if not values:
+                        continue
+
+                    value = values[0].get("fieldValues", [""])[0]
+                    label = class_item.get("label", str(value))
+                    symbol_def = class_item.get("symbol", {}).get("symbol")
+
+                    if symbol_def:
+                        symbol = self.symbol_factory.create_symbol(symbol_def)
+                        category = QgsRendererCategory(value, symbol, label)
+                        categories.append(category)
+
+            # --- Symbol Level Drawing Logic ---
+            if full_layer_def and 'symbolLayerDrawing' in full_layer_def:
+                print("\n--- Applying Symbol Level Drawing by Reordering Categories ---")
+
+                symbol_layers_order = full_layer_def['symbolLayerDrawing'].get('symbolLayers', [])
+                if symbol_layers_order:
+                    draw_order_map = {s['symbolLayerName']: i for i, s in enumerate(symbol_layers_order)}
+                    categories.sort(key=lambda cat: draw_order_map.get(cat.label(), -1))
+                    print("Successfully reordered categories for correct drawing.")
+                else:
+                    print("WARNING: 'symbolLayerDrawing' key found, but 'symbolLayers' is empty.")
+
+            # Add the (now correctly ordered) categories to the renderer
+            for category in categories:
+                renderer.addCategory(category)
+
+        # Handle default symbol
+        default_symbol_def = renderer_def.get("defaultSymbol")
+        if default_symbol_def:
+            # --- THIS IS THE FINAL CORRECTED LINE ---
+            # Removed the extra 'layer' argument that was causing the TypeError
+            default_symbol = self.symbol_factory.create_symbol(default_symbol_def.get("symbol"))
+            if isinstance(renderer, QgsRuleBasedRenderer):
+                else_rule = QgsRuleBasedRenderer.Rule(default_symbol, elseRule=True, label="Other")
+                renderer.rootRule().appendChild(else_rule)
+            elif isinstance(renderer, QgsCategorizedSymbolRenderer):
+                default_category = QgsRendererCategory(None, default_symbol, "<all other values>")
+                renderer.addCategory(default_category)
+
+        return renderer
+        
     
     
     def _create_bivariate_renderer(self, renderer_def: Dict[str, Any],
@@ -299,6 +361,7 @@ class VectorRenderer:
                 renderer.setSourceSymbol(default_symbol)
 
         return renderer
+
     
     def _create_proportional_renderer(self, renderer_def: Dict[str, Any],
                                       layer: QgsVectorLayer) -> QgsSingleSymbolRenderer:
