@@ -15,6 +15,7 @@ from PyQt5.QtGui import QFont
 
 from arc_to_q.converters.utils import parse_color
 from arc_to_q.converters.label_vbscript_converter import convert_label_expression
+from arc_to_q.converters.label_domain_converter import domain_to_case_expression
 
 
 def _parse_arcade_expression(expression: str) -> str:
@@ -71,12 +72,19 @@ def _color_from_symbol_layers(symbol_layers):
     return parse_color(None)
 
 
-def _make_label_settings(label_class: dict) -> QgsPalLayerSettings:
+def _make_label_settings(layer: QgsVectorLayer, label_class: dict, layer_def: dict) -> QgsPalLayerSettings:
     expression, is_expression = _parse_expression(label_class.get("expression", ""), label_class.get("expressionEngine", "Arcade"))
     text_symbol = label_class.get("textSymbol", {}).get("symbol", {})
     placement_props = label_class.get("maplexLabelPlacementProperties", {})
     underline = text_symbol.get("underline", False)
     strikeout = text_symbol.get("strikethrough", False)
+
+    # --- Check for coded value domain ---!!!
+    if label_class.get("useCodedValue", False) and not is_expression:
+        domain_expression = domain_to_case_expression(layer, expression)
+        if domain_expression:
+            expression = domain_expression
+            is_expression = True
 
     # --- Text Format ---
     text_format = QgsTextFormat()
@@ -250,7 +258,7 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
         root_rule = QgsRuleBasedLabeling.Rule(QgsPalLayerSettings())
         for label_class in label_classes:
             where = _parse_where_clause(label_class.get("whereClause", ""))
-            labeling = _make_label_settings(label_class)
+            labeling = _make_label_settings(layer, label_class, layer_def)
             rule = QgsRuleBasedLabeling.Rule(labeling)
             if where:
                 rule.setFilterExpression(where)
@@ -261,7 +269,7 @@ def set_labels(layer: QgsVectorLayer, layer_def: dict):
         labeling = QgsRuleBasedLabeling(root_rule)
         layer.setLabeling(labeling)
     else:
-        labeling = _make_label_settings(label_classes[0])
+        labeling = _make_label_settings(layer, label_classes[0], layer_def)
         layer.setLabeling(QgsVectorLayerSimpleLabeling(labeling))
 
     visibility = layer_def.get("labelVisibility", False)

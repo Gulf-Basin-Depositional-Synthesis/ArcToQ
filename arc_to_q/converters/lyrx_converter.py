@@ -371,6 +371,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
     project.addMapLayer(layer, False)
     return layer
 
+
 def create_raster_layer(abs_uri, layer_name):
     """Create and validate a QGIS raster layer.
     
@@ -475,76 +476,6 @@ def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> No
         raise RuntimeError(f"Failed to export layer definition: {error_message}")
 
 
-def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
-    """Convert an ArcGIS Pro .lyrx file to a QGIS .qlr file
-
-    Args:
-        in_lyrx (str): Path to the input .lyrx file.
-        out_folder (str, optional): Folder to save the output .qlr file. If not provided,
-            the output will be saved in the same folder as the input .lyrx file.
-        qgs (QgsApplication, optional): An initialized QgsApplication instance. If not provided,
-            a new instance will be created and initialized within this function.
-    """
-    print(f"Converting {in_lyrx}...")
-    if not out_folder:
-        out_folder = os.path.dirname(in_lyrx)
-    in_folder = os.path.abspath(os.path.dirname(in_lyrx))
-    out_file = os.path.join(out_folder, os.path.basename(in_lyrx).replace(".lyrx", ".qlr"))
-
-    manage_qgs = qgs is None
-    if manage_qgs:
-        qgs = QgsApplication([], False)
-        qgs.initQgis()
-
-    project = QgsProject.instance()
-
-    try:
-        lyrx = _open_lyrx(in_lyrx)
-        if len(lyrx["layers"]) != 1:
-            raise Exception(f"Unexpected number of layers found: {len(lyrx['layers'])}")
-
-        layer_uri = lyrx["layers"][0]
-        layer_def = next((ld for ld in lyrx.get("layerDefinitions", []) if ld.get("uRI") == layer_uri), {})
-        
-        layer_type = layer_def.get("type")
-        nodes_to_export = []
-
-        if layer_type == "CIMGroupLayer":
-            root_node = _convert_group_layer(in_folder, layer_def, lyrx, out_file, project)
-            nodes_to_export = [root_node]
-        elif layer_type == "CIMFeatureLayer":
-            out_layer = _convert_feature_layer(in_folder, layer_def, out_file, project)
-            _set_metadata(out_layer, layer_def)
-            _set_scale_visibility(out_layer, layer_def)
-            _export_qlr_with_visibility(out_layer, layer_def, out_file)
-          
-        elif layer_type == 'CIMRasterLayer':
-            out_layer = _convert_raster_layer(in_folder, layer_def, out_file, project)
-            _set_metadata(out_layer, layer_def)
-            _set_scale_visibility(out_layer, layer_def)
-            _export_qlr_with_visibility(out_layer, layer_def, out_file)
-
-        elif layer_type == 'CIMAnnotationLayer':
-            print("Annotation layers are unsupported")
-            return
-        else:
-            raise Exception(f"Unhandled layer type: {layer_type}")
-
-        # Export the QLR including the layer tree node(s)
-        if nodes_to_export:
-            ok, error_message = QgsLayerDefinition.exportLayerDefinition(out_file, nodes_to_export)
-            if not ok:
-                raise RuntimeError(f"Failed to export layer definition: {error_message}")
-
-        print(f"Successfully converted {in_lyrx} to {out_file}")
-    except Exception as e:
-        print(f"Error converting LYRX: {e}")
-        raise
-    finally:
-        project.clear()  # Clear the project instance for the next run
-        if manage_qgs:
-            qgs.exitQgis()
-    
 
 def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, project):
     """
@@ -587,6 +518,78 @@ def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, projec
 
     return group_node
 
+
+def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
+    """Convert an ArcGIS Pro .lyrx file to a QGIS .qlr file
+
+    Args:
+        in_lyrx (str): Path to the input .lyrx file.
+        out_folder (str, optional): Folder to save the output .qlr file. If not provided,
+            the output will be saved in the same folder as the input .lyrx file.
+        qgs (QgsApplication, optional): An initialized QgsApplication instance. If not provided,
+            a new instance will be created and initialized within this function. Even though we
+            might not pass anything to the instance, we still need it for other QGIS objects
+            to be instantiated and function properly.
+    """
+    if not out_folder:
+        out_folder = os.path.dirname(in_lyrx)
+    in_folder = os.path.abspath(os.path.dirname(in_lyrx))
+    out_file = os.path.join(out_folder, os.path.basename(in_lyrx).replace(".lyrx", ".qlr"))
+
+    manage_qgs = qgs is None
+    if manage_qgs:
+        qgs = QgsApplication([], False)
+        qgs.initQgis()
+
+    # Even though we might not pass anything to the instance, we still need it for other QGIS
+    # objects to be instantiated and function properly, particularly wrt symbology.
+    project = QgsProject.instance()
+
+    try:
+        lyrx = _open_lyrx(in_lyrx)
+        if len(lyrx["layers"]) != 1:
+            raise Exception(f"Unexpected number of layers found: {len(lyrx['layers'])}")
+
+        layer_uri = lyrx["layers"][0]
+        layer_def = next((ld for ld in lyrx.get("layerDefinitions", []) if ld.get("uRI") == layer_uri), {})
+        
+        layer_type = layer_def.get("type")
+        nodes_to_export = []
+
+        if layer_type == "CIMGroupLayer":
+            root_node = _convert_group_layer(in_folder, layer_def, lyrx, out_file, project)
+            nodes_to_export = [root_node]
+        elif layer_type == "CIMFeatureLayer":
+            out_layer = _convert_feature_layer(in_folder, layer_def, out_file, project)
+            _set_metadata(out_layer, layer_def)
+            _set_scale_visibility(out_layer, layer_def)
+            _export_qlr_with_visibility(out_layer, layer_def, out_file)
+          
+        elif layer_type == 'CIMRasterLayer':
+            out_layer = _convert_raster_layer(in_folder, layer_def, out_file, project)
+            _set_metadata(out_layer, layer_def)
+            _set_scale_visibility(out_layer, layer_def)
+            _export_qlr_with_visibility(out_layer, layer_def, out_file)
+
+        elif layer_type == 'CIMAnnotationLayer':
+            print("Annotation layers are unsupported")
+            return
+        else:
+            raise Exception(f"Unhandled layer type: {layer_type}")
+
+        # Export the QLR including the layer tree node(s)
+        if nodes_to_export:
+            ok, error_message = QgsLayerDefinition.exportLayerDefinition(out_file, nodes_to_export)
+            if not ok:
+                raise RuntimeError(f"Failed to export layer definition: {error_message}")
+    except Exception as e:
+        print(f"Error converting LYRX: {e}")
+        raise
+    finally:
+        project.clear()  # Clear the project instance for the next run
+        if manage_qgs:
+            qgs.exitQgis()
+    
 
 if __name__ == "__main__":
     output_folder = r""
