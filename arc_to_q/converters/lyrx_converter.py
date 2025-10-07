@@ -497,9 +497,23 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
 
     (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
 
-    # Create the raster layer.
-    rlayer = QgsRasterLayer(abs_uri, layer_name, "gdal")
-    if not rlayer.isValid():
+    # Suppress GDAL warnings
+    # Save the current logging setting and redirect logs to a null device.
+    gdal_log_file = os.environ.get('CPL_LOG')
+    os.environ['CPL_LOG'] = os.devnull
+    rlayer = None
+
+    try:
+        # Create the raster layer. This is where the warnings are generated.
+        rlayer = QgsRasterLayer(abs_uri, layer_name, "gdal")
+    finally:
+        # Restore the original GDAL logging setting, whether the layer loaded successfully or not.
+        if gdal_log_file:
+            os.environ['CPL_LOG'] = gdal_log_file
+        else:
+            os.environ.pop('CPL_LOG', None)
+
+    if not rlayer or not rlayer.isValid():
         error_msg = f"Raster layer failed to load: {layer_name}"
         if os.path.exists(abs_uri):
             error_msg += f"\nFile exists at '{abs_uri}' but GDAL could not open it. Check format or permissions."
