@@ -2,7 +2,8 @@
 
 import json
 import os
-from pathlib import Path
+import re
+from pathlib import Path 
 
 from qgis.core import (
     QgsApplication,
@@ -16,15 +17,12 @@ from qgis.core import (
     Qgis
 )
 
-
 from arc_to_q.converters.vector.vector_renderer import VectorRenderer
 from arc_to_q.converters.label_converter import set_labels
 from arc_to_q.converters.raster.raster_renderer import (
     apply_raster_symbology,
     switch_to_relative_path,
 )
-
-
 
 def _open_lyrx(lyrx):
     with open(lyrx, 'r', encoding='utf-8') as f:
@@ -71,6 +69,78 @@ def _parse_definition_query(layer_def: dict):
         # Return the query string with the pipe delimiter for QGIS
         return f"|subset={qgis_query}"
     return ""
+
+def _parse_xml_dataconnection(xml_string: str) -> dict | None:
+    """
+    Parses complex XML data connection strings to extract raster path and dataset.
+
+    Some .lyrx files, especially those involving raster functions or complex sources,
+    store the data connection as a nested XML string instead of a simple dictionary.
+    This function attempts to extract the key workspace and dataset information
+    using several regular expression patterns.
+
+    Args:
+        xml_string (str): The XML content from the 'dataConnection' or 'dataset' field.
+
+    Returns:
+        dict | None: A dictionary with 'workspaceConnectionString', 'dataset', 'workspaceFactory',
+                      and 'datasetType' keys, or None if parsing fails.
+    """
+    # Method 1: Look for a standard CIMDataConnection format within the XML.
+    ws_match = re.search(r"<WorkspaceConnectionString>DATABASE=([^<]+)</WorkspaceConnectionString>", xml_string)
+    dataset_match = re.search(r"<Dataset>([^<]+)</Dataset>", xml_string)
+    if ws_match and dataset_match:
+        path = ws_match.group(1).strip().rstrip(';')
+        dataset = dataset_match.group(1).strip()
+        return {
+            "workspaceConnectionString": f"DATABASE={path}",
+            "dataset": dataset,
+            "workspaceFactory": "Raster",
+            "datasetType": "esriDTRasterDataset"
+        }
+
+    # Method 2: Handle complex nested XML (e.g., XmlRasterDataset with GeometricFunction).
+    # This format often buries the true path and filename in different tags.
+    if "XmlRasterDataset" in xml_string:
+        path_match = re.search(r"<PathName>([^<]+)</PathName>", xml_string)
+        # The actual filename is often in a <Name> tag inside a RasterDatasetName section.
+        raster_section_match = re.search(
+            r"RasterDatasetName[^>]*>.*?<Name>([^<]+\.(?:png|tif|tiff|jpg|jpeg|img|sid|ecw))</Name>",
+            xml_string,
+            re.IGNORECASE | re.DOTALL
+        )
+        if path_match and raster_section_match:
+            path = path_match.group(1).strip()
+            dataset = raster_section_match.group(1).strip()
+            return {
+                "workspaceConnectionString": f"DATABASE={path}",
+                "dataset": dataset,
+                "workspaceFactory": "Raster",
+                "datasetType": "esriDTRasterDataset"
+            }
+
+    # Method 3: Fallback to find any path and a plausible-looking dataset name.
+    path_match = re.search(r"<PathName>([^<]+)</PathName>", xml_string)
+    name_matches = re.findall(r"<Name>([^<]+)</Name>", xml_string)
+    dataset = None
+    for name in name_matches:
+        # Skip names that are likely function types.
+        if not any(word in name.lower() for word in ['function', 'geometric', 'transform']):
+            # Check if it looks like a filename (has a common image extension).
+            if '.' in name and any(name.lower().endswith(ext) for ext in ['.png', '.tif', '.tiff', '.jpg', '.jpeg', '.img', '.sid', '.ecw']):
+                dataset = name.strip()
+                break # Found a suitable dataset name
+
+    if path_match and dataset:
+        path = path_match.group(1).strip()
+        return {
+            "workspaceConnectionString": f"DATABASE={path}",
+            "dataset": dataset,
+            "workspaceFactory": "Raster",
+            "datasetType": "esriDTRasterDataset"
+        }
+
+    return None
 
 
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
@@ -371,68 +441,79 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
     project.addMapLayer(layer, False)
     return layer
 
-
-def create_raster_layer(abs_uri, layer_name):
-    """Create and validate a QGIS raster layer.
-    
-    Args:
-        abs_uri (str): Absolute path to the raster file.
-        layer_name (str): Name for the QGIS layer.
-        
-    Returns:
-        QgsRasterLayer: The created raster layer.
-        
-    Raises:
-        RuntimeError: If the layer cannot be loaded.
-    """
-    print(f"Attempting to load raster from: {abs_uri}")
-    
-    rlayer = QgsRasterLayer(abs_uri, layer_name)
-    if not rlayer.isValid():
-        error_msg = f"Failed to load raster layer: {abs_uri}"
-        if rlayer.error().summary():
-            error_msg += f"\nError: {rlayer.error().summary()}"
-        
-        # Additional debugging info
-        if os.path.exists(abs_uri):
-            error_msg += f"\nFile exists but GDAL cannot read it. Check file format/permissions."
-        else:
-            error_msg += f"\nFile does not exist at: {abs_uri}"
-        
-        print(error_msg)
-        raise RuntimeError(error_msg)
-    
-    return rlayer
-
 def _convert_raster_layer(in_folder, layer_def, out_file, project):
-    """Create a QgsRasterLayer from a CIMRasterLayer layer definition."""
+    """
+    Creates a QgsRasterLayer from a CIMRasterLayer definition.
+
+    This function is designed to handle various formats for the 'dataConnection'
+    in a .lyrx file. It can be a standard dictionary or a complex XML string,
+    which is common for rasters with functions applied. It parses the connection,
+    builds the source URI, creates the QGIS layer, and applies symbology.
+
+    Args:
+        in_folder (str): The directory of the input .lyrx file.
+        layer_def (dict): The layer definition dictionary from the parsed .lyrx JSON.
+        out_file (str): The path for the output .qlr file.
+        project (QgsProject): The active QgsProject instance.
+
+    Returns:
+        QgsRasterLayer: The created and configured QGIS raster layer.
+
+    Raises:
+        RuntimeError: If the data connection is missing or cannot be parsed, or if the
+                      raster layer fails to load.
+    """
     layer_name = layer_def.get("name", "Raster")
+    data_connection = layer_def.get("dataConnection")
 
-    # ArcGIS CIM for rasters typically stores a dataConnection directly on the layer.
-    # Fallback in case it's nested (some exports).
-    data_connection = (
-        layer_def.get("dataConnection")
-        or layer_def.get("raster", {}).get("dataConnection")
-        or {}
-    )
     if not data_connection:
-        raise RuntimeError("Raster layer missing 'dataConnection'.")
+        raise RuntimeError(f"Raster layer '{layer_name}' is missing the 'dataConnection' definition.")
 
-    # No definition query for rasters
+    # Case 1: The data connection is an XML string that needs parsing.
+    if isinstance(data_connection, str):
+        parsed_connection = _parse_xml_dataconnection(data_connection)
+        if not parsed_connection:
+            raise RuntimeError(f"Failed to parse XML data connection for raster layer: {layer_name}")
+        data_connection = parsed_connection
+
+    # Case 2: The data connection is a dict, but its 'dataset' field contains the XML.
+    elif isinstance(data_connection, dict):
+        dataset_value = data_connection.get('dataset', '')
+        if isinstance(dataset_value, str) and '<' in dataset_value:
+            parsed_connection = _parse_xml_dataconnection(dataset_value)
+            if parsed_connection:
+                # Use the workspace from the parent dict if the parsed one is incomplete.
+                if 'workspaceConnectionString' in data_connection and parsed_connection.get('workspaceConnectionString') in (None, 'DATABASE='):
+                    parsed_connection['workspaceConnectionString'] = data_connection['workspaceConnectionString']
+                data_connection = parsed_connection
+            else:
+                 raise RuntimeError(f"Failed to parse XML in 'dataset' field for raster layer: {layer_name}")
+
+    if not isinstance(data_connection, dict):
+        raise RuntimeError(f"Unexpected data_connection type: {type(data_connection)} for layer {layer_name}")
+
+    # Normalize keys (e.g., 'WorkspaceConnectionString' -> 'workspaceConnectionString') for consistency.
+    data_connection = {k[0].lower() + k[1:]: v for k, v in data_connection.items()}
+
     (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
 
-    # Load with GDAL provider
+    # Create the raster layer.
     rlayer = QgsRasterLayer(abs_uri, layer_name, "gdal")
     if not rlayer.isValid():
-        raise RuntimeError(f"Raster layer failed to load: {layer_name} {abs_uri}")
+        error_msg = f"Raster layer failed to load: {layer_name}"
+        if os.path.exists(abs_uri):
+            error_msg += f"\nFile exists at '{abs_uri}' but GDAL could not open it. Check format or permissions."
+        else:
+            error_msg += f"\nFile not found at '{abs_uri}'."
+        raise RuntimeError(error_msg)
 
-    # Prefer relative path in the saved QLR
-    # setDataSource is available in QGIS 3 for generic map layers; if unavailable,
-    # you can remove this line to keep absolute paths in the QLR.
+    # Prefer a relative path in the saved QLR file for portability.
     try:
-        rlayer.setDataSource(rel_uri, rlayer.name(), rlayer.providerType())
+        test_layer = QgsRasterLayer(rel_uri, "test", "gdal")
+        if test_layer.isValid():
+            rlayer.setDataSource(rel_uri, rlayer.name(), rlayer.providerType())
     except Exception:
-        print("Warning: Could not set relative path for raster layer; using absolute path in QLR.")
+        print(f"Warning: Could not set relative path for raster layer '{layer_name}'; using absolute path in QLR.")
 
     apply_raster_symbology(rlayer, layer_def)
     switch_to_relative_path(rlayer, rel_uri)
