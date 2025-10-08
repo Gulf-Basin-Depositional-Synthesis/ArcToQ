@@ -62,16 +62,23 @@ class SymbolFactory:
             marker_symbol.appendSymbolLayer(create_default_marker_layer())
             return marker_symbol
 
-        vector_def = next((l for l in arc_layers if l.get("type") == "CIMVectorMarker"), None)
-        char_def = next((l for l in arc_layers if l.get("type") == "CIMCharacterMarker"), None)
+        for layer_def in arc_layers:
+            if not layer_def.get("enable", True):
+                continue
+            
+            qgis_layer = None
+            layer_type = layer_def.get("type")
+            if layer_type == "CIMVectorMarker":
+                qgis_layer = create_simple_marker_from_vector(layer_def)
+            elif layer_type == "CIMCharacterMarker":
+                qgis_layer = create_font_marker_from_character(layer_def)
 
-        qgis_layer = None
-        if vector_def:
-            qgis_layer = create_simple_marker_from_vector(vector_def)
-        elif char_def:
-            qgis_layer = create_font_marker_from_character(char_def)
+            if qgis_layer:
+                marker_symbol.appendSymbolLayer(qgis_layer)
 
-        marker_symbol.appendSymbolLayer(qgis_layer or create_default_marker_layer())
+        if marker_symbol.symbolLayerCount() == 0:
+            marker_symbol.appendSymbolLayer(create_default_marker_layer())
+            
         return marker_symbol
     
     @staticmethod

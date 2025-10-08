@@ -50,17 +50,29 @@ def create_simple_marker_from_vector(layer_def: Dict[str, Any]) -> Optional[QgsS
         fill_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidFill"), None)
         stroke_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidStroke"), None)
 
-        if fill_def and (fill_color := parse_color(fill_def.get("color"))) and fill_color.alpha() > 0:
-            marker_layer.setColor(fill_color)
-        else:
-            marker_layer.setColor(QColor(0, 0, 0, 0))  # Transparent
+        has_fill = False
+        if fill_def and (fill_color := parse_color(fill_def.get("color"))):
+            if fill_color.alpha() > 0:
+                marker_layer.setColor(fill_color)
+                has_fill = True
 
+        has_stroke = False
         if stroke_def and (stroke_color := parse_color(stroke_def.get("color"))) and (stroke_width := stroke_def.get("width", 0.26)) > 0:
             marker_layer.setStrokeStyle(Qt.SolidLine)
             marker_layer.setStrokeColor(stroke_color)
             marker_layer.setStrokeWidth(stroke_width)
             marker_layer.setStrokeWidthUnit(QgsUnitTypes.RenderPoints)
-        else:
+            has_stroke = True
+        
+        if not has_fill and not has_stroke:
+            # Fallback to a default visible marker
+            marker_layer.setColor(QColor("red"))
+            marker_layer.setStrokeColor(QColor("black"))
+            marker_layer.setStrokeWidth(0.2)
+            marker_layer.setStrokeStyle(Qt.SolidLine)
+        elif not has_fill:
+            marker_layer.setColor(QColor(0, 0, 0, 0)) # transparent fill
+        elif not has_stroke:
             marker_layer.setStrokeStyle(Qt.NoPen)
 
         return marker_layer
@@ -74,7 +86,7 @@ def create_font_marker_from_character(layer_def: Dict[str, Any]) -> Optional[Qgs
     try:
         font_layer = QgsFontMarkerSymbolLayer()
         font_family = layer_def.get("fontFamilyName", "Arial")
-        character_code = layer_def.get("characterIndex", 32)  # Default to space
+        character_code = layer_def.get("characterIndex", 63)  # Default to '?'
         character = chr(character_code)
 
         color = QColor("black")

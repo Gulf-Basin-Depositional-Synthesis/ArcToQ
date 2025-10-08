@@ -100,25 +100,18 @@ def _create_marker_line_layers_from_sub_symbol(sub_symbol: QgsMarkerSymbol, laye
     """Creates marker line layers for a given sub-symbol based on placement rules."""
     placement = layer_def.get("markerPlacement", {})
     placement_type = placement.get("type", "")
-
-    if "AlongLineSameSize" in placement_type and (symbol_layer := sub_symbol.symbolLayer(0)):
-        size = layer_def.get("size", 6.0)
-        offset_y = -size / 1.4 if "offset" in placement else -size * 0.15
-        symbol_layer.setOffset(QPointF(0, offset_y))
-        symbol_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
-
     qgis_layers = []
-    positions = placement.get("positionArray")
 
-    if "AtRatioPositions" in placement_type and positions is not None:
-        if 0.0 in positions and 1.0 in positions:
-            start_layer = _create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.Placement.FirstVertex)
-            end_layer = _create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.Placement.LastVertex)
-            qgis_layers.extend([start_layer, end_layer])
-        else:
-            placement_map = {0.5: QgsMarkerLineSymbolLayer.Placement.CentralPoint, 0.0: QgsMarkerLineSymbolLayer.Placement.FirstVertex, 1.0: QgsMarkerLineSymbolLayer.Placement.LastVertex}
-            qgis_placement = placement_map.get(positions[0] if positions else 0.5, QgsMarkerLineSymbolLayer.Placement.CentralPoint)
-            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, qgis_placement))
+    if "AtRatioPositions" in placement_type:
+        positions = placement.get("positionArray", [0.5])
+        
+        if 0.0 in positions:
+            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.Placement.FirstVertex))
+        if 1.0 in positions:
+            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.Placement.LastVertex))
+        if 0.5 in positions:
+            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.Placement.CentralPoint))
+
     elif "AlongLineSameSize" in placement_type:
         marker_layer = _create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.Placement.Interval)
         template = placement.get("placementTemplate", [10])
@@ -128,6 +121,7 @@ def _create_marker_line_layers_from_sub_symbol(sub_symbol: QgsMarkerSymbol, laye
             marker_layer.setOffset(offset)
             marker_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
         qgis_layers.append(marker_layer)
+        
     else:
         qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.Placement.CentralPoint))
 
@@ -144,12 +138,21 @@ def _create_single_marker_line(sub_symbol: QgsMarkerSymbol, layer_def: Dict[str,
         marker_layer.setRotateMarker(True)
     if placement_rules.get("placePerPart", False):
         marker_layer.setPlaceOnEveryPart(True)
+    
+    # This is the fix for the double-plunge arch:
+    if placement_rules.get("flipFirst") and placement_enum == QgsMarkerLineSymbolLayer.Placement.FirstVertex:
+        cloned_sub_symbol = marker_layer.subSymbol().clone()
+        if cloned_sub_symbol.symbolLayerCount() > 0:
+            first_layer = cloned_sub_symbol.symbolLayer(0)
+            first_layer.setAngle(first_layer.angle() + 180)
+        marker_layer.setSubSymbol(cloned_sub_symbol)
+
     return marker_layer
 
 
 def create_default_line_layer() -> QgsSimpleLineSymbolLayer:
     """Create a default line symbol layer."""
     layer = QgsSimpleLineSymbolLayer()
-    layer.setColor(QColor(0, 0, 255))  # Blue
+    layer.setColor(QColor(0, 0, 255))
     layer.setWidth(0.5)
     return layer
