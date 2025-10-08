@@ -74,6 +74,77 @@ def _parse_definition_query(layer_def: dict):
         return f"|subset={qgis_query}"
     return ""
 
+def _parse_xml_dataconnection(xml_string: str) -> dict | None:
+    """
+    Parses complex XML data connection strings to extract raster path and dataset.
+
+    Some .lyrx files, especially those involving raster functions or complex sources,
+    store the data connection as a nested XML string instead of a simple dictionary.
+    This function attempts to extract the key workspace and dataset information
+    using several regular expression patterns.
+
+    Args:
+        xml_string (str): The XML content from the 'dataConnection' or 'dataset' field.
+
+    Returns:
+        dict | None: A dictionary with 'workspaceConnectionString', 'dataset', 'workspaceFactory',
+                      and 'datasetType' keys, or None if parsing fails.
+    """
+    # Method 1: Look for a standard CIMDataConnection format within the XML.
+    ws_match = re.search(r"<WorkspaceConnectionString>DATABASE=([^<]+)</WorkspaceConnectionString>", xml_string)
+    dataset_match = re.search(r"<Dataset>([^<]+)</Dataset>", xml_string)
+    if ws_match and dataset_match:
+        path = ws_match.group(1).strip().rstrip(';')
+        dataset = dataset_match.group(1).strip()
+        return {
+            "workspaceConnectionString": f"DATABASE={path}",
+            "dataset": dataset,
+            "workspaceFactory": "Raster",
+            "datasetType": "esriDTRasterDataset"
+        }
+
+    # Method 2: Handle complex nested XML (e.g., XmlRasterDataset with GeometricFunction).
+    # This format often buries the true path and filename in different tags.
+    if "XmlRasterDataset" in xml_string:
+        path_match = re.search(r"<PathName>([^<]+)</PathName>", xml_string)
+        # The actual filename is often in a <Name> tag inside a RasterDatasetName section.
+        raster_section_match = re.search(
+            r"RasterDatasetName[^>]*>.*?<Name>([^<]+\.(?:png|tif|tiff|jpg|jpeg|img|sid|ecw))</Name>",
+            xml_string,
+            re.IGNORECASE | re.DOTALL
+        )
+        if path_match and raster_section_match:
+            path = path_match.group(1).strip()
+            dataset = raster_section_match.group(1).strip()
+            return {
+                "workspaceConnectionString": f"DATABASE={path}",
+                "dataset": dataset,
+                "workspaceFactory": "Raster",
+                "datasetType": "esriDTRasterDataset"
+            }
+
+    # Method 3: Fallback to find any path and a plausible-looking dataset name.
+    path_match = re.search(r"<PathName>([^<]+)</PathName>", xml_string)
+    name_matches = re.findall(r"<Name>([^<]+)</Name>", xml_string)
+    dataset = None
+    for name in name_matches:
+        # Skip names that are likely function types.
+        if not any(word in name.lower() for word in ['function', 'geometric', 'transform']):
+            # Check if it looks like a filename (has a common image extension).
+            if '.' in name and any(name.lower().endswith(ext) for ext in ['.png', '.tif', '.tiff', '.jpg', '.jpeg', '.img', '.sid', '.ecw']):
+                dataset = name.strip()
+                break # Found a suitable dataset name
+
+    if path_match and dataset:
+        path = path_match.group(1).strip()
+        return {
+            "workspaceConnectionString": f"DATABASE={path}",
+            "dataset": dataset,
+            "workspaceFactory": "Raster",
+            "datasetType": "esriDTRasterDataset"
+        }
+
+    return None
 
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
     """Helper to build absolute and relative URIs for a dataset.
@@ -138,7 +209,6 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
 
     return abs_uri, rel_uri
 
-
 def _parse_source(in_folder, data_connection, def_query, out_file):
     """Build both absolute and relative QGIS-friendly URIs for a dataset.
     
@@ -190,7 +260,6 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
         return (abs_uri, rel_uri), join_info
 
     raise NotImplementedError(f"Unsupported dataConnection type: {data_connection.get('type')}")
-
 
 def _set_scale_visibility(layer: QgsVectorLayer, layer_def: dict):
     """Set the scale visibility for a QGIS layer based on the ArcGIS layer definition."""
@@ -380,366 +449,116 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
         node.setItemVisibilityChecked(layer_def['visibility'])
     return layer
 
-def create_raster_layer(abs_uri, layer_name):
-    """Create and validate a QGIS raster layer.
-    
-    Args:
-        abs_uri (str): Absolute path to the raster file.
-        layer_name (str): Name for the QGIS layer.
-        
-    Returns:
-        QgsRasterLayer: The created raster layer.
-        
-    Raises:
-        RuntimeError: If the layer cannot be loaded.
-    """
-    print(f"Attempting to load raster from: {abs_uri}")
-    
-    rlayer = QgsRasterLayer(abs_uri, layer_name)
-    if not rlayer.isValid():
-        error_msg = f"Failed to load raster layer: {abs_uri}"
-        if rlayer.error().summary():
-            error_msg += f"\nError: {rlayer.error().summary()}"
-        
-        # Additional debugging info
-        if os.path.exists(abs_uri):
-            error_msg += f"\nFile exists but GDAL cannot read it. Check file format/permissions."
-        else:
-            error_msg += f"\nFile does not exist at: {abs_uri}"
-        
-        print(error_msg)
-        raise RuntimeError(error_msg)
-    
-    return rlayer
-
-def _parse_xml_dataconnection(xml_string):
-    """
-    Parses XML data connection strings to extract raster path and dataset.
-    Handles various XML formats including complex nested structures.
-    """
-    print(f"    Attempting to parse XML (length: {len(xml_string)})")
-    print(f"    First 300 chars: {xml_string[:300]}")
-    
-    # Method 1: Standard CIMDataConnection format
-    ws_match = re.search(
-        r"<WorkspaceConnectionString>DATABASE=([^<]+)</WorkspaceConnectionString>",
-        xml_string
-    )
-    dataset_match = re.search(
-        r"<Dataset>([^<]+)</Dataset>",
-        xml_string
-    )
-    
-    if ws_match and dataset_match:
-        path = ws_match.group(1).strip()
-        dataset = dataset_match.group(1).strip()
-        
-        if path.endswith(';'):
-            path = path[:-1]
-        
-        print(f"    Parsed using standard format:")
-        print(f"      Path: {path}")
-        print(f"      Dataset: {dataset}")
-        
-        return {
-            "workspaceConnectionString": f"DATABASE={path}",
-            "dataset": dataset,
-            "workspaceFactory": "Raster",
-            "datasetType": "esriDTRasterDataset"
-        }
-    
-    # Method 2: Complex nested XML (XmlRasterDataset with GeometricFunction)
-    # This is the format in your problematic file
-    # Look for RasterDatasetName which contains the actual file info
-    if "XmlRasterDataset" in xml_string and "GeometricFunction" in xml_string:
-        print(f"    Detected XmlRasterDataset with GeometricFunction")
-        
-        # Look for the PathName in the nested structure
-        path_match = re.search(r"<PathName>([^<]+)</PathName>", xml_string)
-        
-        # For the dataset name, we need to look in the RasterDatasetName section
-        # The actual filename is in a <Name> tag within RasterDatasetName
-        # Use a more specific pattern to avoid matching "Geometric Function"
-        
-        # First try to find the name within RasterDatasetName context
-        raster_section = re.search(
-            r"RasterDatasetName[^>]*>.*?<Name>([^<]+\.(?:png|tif|tiff|jpg|jpeg|img|sid|ecw))</Name>",
-            xml_string,
-            re.IGNORECASE | re.DOTALL
-        )
-        
-        if not raster_section:
-            # Try alternative: look for Name tag that contains an image extension
-            raster_section = re.search(
-                r"<Name>([^<]+\.(?:png|tif|tiff|jpg|jpeg|img|sid|ecw))</Name>",
-                xml_string,
-                re.IGNORECASE
-            )
-        
-        if path_match and raster_section:
-            path = path_match.group(1).strip()
-            dataset = raster_section.group(1).strip()
-            
-            print(f"    Parsed XmlRasterDataset format:")
-            print(f"      Path: {path}")
-            print(f"      Dataset: {dataset}")
-            
-            return {
-                "workspaceConnectionString": f"DATABASE={path}",
-                "dataset": dataset,
-                "workspaceFactory": "Raster",
-                "datasetType": "esriDTRasterDataset"
-            }
-    
-    # Method 3: Look for PathName and any Name tag (but skip "Geometric Function")
-    path_match = re.search(r"<PathName>([^<]+)</PathName>", xml_string)
-    
-    # Find all <Name> tags and filter out function names
-    name_matches = re.findall(r"<Name>([^<]+)</Name>", xml_string)
-    
-    dataset = None
-    for name in name_matches:
-        # Skip function names and look for actual filenames
-        if not any(word in name.lower() for word in ['function', 'geometric', 'transform']):
-            # Check if it looks like a filename (has extension)
-            if '.' in name and any(name.lower().endswith(ext) for ext in ['.png', '.tif', '.tiff', '.jpg', '.jpeg', '.img', '.sid', '.ecw']):
-                dataset = name.strip()
-                print(f"    Found dataset name: {dataset}")
-                break
-    
-    if path_match and dataset:
-        path = path_match.group(1).strip()
-        
-        print(f"    Parsed using PathName/filtered Name format:")
-        print(f"      Path: {path}")
-        print(f"      Dataset: {dataset}")
-        
-        return {
-            "workspaceConnectionString": f"DATABASE={path}",
-            "dataset": dataset,
-            "workspaceFactory": "Raster",
-            "datasetType": "esriDTRasterDataset"
-        }
-    
-    # Method 4: Last resort - look for path and any image filename in the XML
-    path = None
-    dataset = None
-    
-    # Try to find a path
-    path_patterns = [
-        r"<PathName>([^<]+)</PathName>",
-        r"DATABASE=([^;<\"]+)",
-        r"Workspace\s*=\s*([^;<\"]+)",
-    ]
-    
-    for pattern in path_patterns:
-        match = re.search(pattern, xml_string, re.IGNORECASE)
-        if match:
-            path = match.group(1).strip()
-            if ';' in path:
-                path = path.split(';')[0]
-            print(f"    Found path using pattern '{pattern}': {path}")
-            break
-    
-    # Look for any string that looks like an image filename
-    # This regex looks for strings that have image extensions
-    file_pattern = r">([^<>]*\.(?:png|tif|tiff|jpg|jpeg|img|sid|ecw))<"
-    file_matches = re.findall(file_pattern, xml_string, re.IGNORECASE)
-    
-    if file_matches:
-        # Take the last match as it's more likely to be the actual filename
-        # (earlier matches might be in comments or examples)
-        dataset = file_matches[-1].strip()
-        print(f"    Found dataset using file pattern: {dataset}")
-    
-    if path and dataset:
-        # Clean up Windows paths
-        path = path.replace('\\', '/')
-        
-        print(f"    Successfully parsed using fallback patterns:")
-        print(f"      Path: {path}")
-        print(f"      Dataset: {dataset}")
-        
-        return {
-            "workspaceConnectionString": f"DATABASE={path}",
-            "dataset": dataset,
-            "workspaceFactory": "Raster",
-            "datasetType": "esriDTRasterDataset"
-        }
-    
-    # If all methods fail, log what we found
-    print(f"    ERROR: Could not parse XML")
-    print(f"      Path found: {path}")
-    print(f"      Dataset found: {dataset}")
-    print(f"      All Name tags found: {name_matches if 'name_matches' in locals() else 'None'}")
-    print(f"    Last 300 chars: {xml_string[-300:]}")
-    
-    return None
-
-
 def _convert_raster_layer(in_folder, layer_def, out_file, project):
-    """Create a QgsRasterLayer from a CIMRasterLayer layer definition."""
-    
+    """
+    Creates a QgsRasterLayer from a CIMRasterLayer definition.
+
+    This function is designed to handle various formats for the 'dataConnection'
+    in a .lyrx file. It can be a standard dictionary or a complex XML string,
+    which is common for rasters with functions applied. It parses the connection,
+    builds the source URI, creates the QGIS layer, and applies symbology.
+
+    Args:
+        in_folder (str): The directory of the input .lyrx file.
+        layer_def (dict): The layer definition dictionary from the parsed .lyrx JSON.
+        out_file (str): The path for the output .qlr file.
+        project (QgsProject): The active QgsProject instance.
+
+    Returns:
+        QgsRasterLayer: The created and configured QGIS raster layer.
+
+    Raises:
+        RuntimeError: If the data connection is missing or cannot be parsed, or if the
+                      raster layer fails to load.
+    """
     layer_name = layer_def.get("name", "Raster")
-    print(f"Converting raster layer: {layer_name}")
-    
-    # Get the data connection
     data_connection = layer_def.get("dataConnection")
-    
+
     if not data_connection:
-        raise RuntimeError(f"Raster layer '{layer_name}' missing 'dataConnection'.")
-    
-    # Handle different forms of data_connection
-    
-    # Case 1: data_connection is a string (XML)
+        raise RuntimeError(f"Raster layer '{layer_name}' is missing the 'dataConnection' definition.")
+
+    # Case 1: The data connection is an XML string that needs parsing.
     if isinstance(data_connection, str):
-        print(f"  dataConnection is XML string, parsing...")
-        parsed = _parse_xml_dataconnection(data_connection)
-        if parsed:
-            data_connection = parsed
-        else:
-            # Try to provide more helpful error
-            print(f"  Could not parse XML data connection")
-            print(f"  XML preview: {data_connection[:500]}")
-            raise NotImplementedError(f"Could not parse XML data connection for layer: {layer_name}")
-    
-    # Case 2: data_connection is a dict
+        parsed_connection = _parse_xml_dataconnection(data_connection)
+        if not parsed_connection:
+            raise RuntimeError(f"Failed to parse XML data connection for raster layer: {layer_name}")
+        data_connection = parsed_connection
+
+    # Case 2: The data connection is a dict, but its 'dataset' field contains the XML.
     elif isinstance(data_connection, dict):
-        print(f"  dataConnection is dict with keys: {list(data_connection.keys())}")
-        
-        # Check if the dataset field contains XML
         dataset_value = data_connection.get('dataset', '')
-        
-        # Check if dataset looks like XML (contains tags and namespaces)
-        if isinstance(dataset_value, str) and ('<' in dataset_value or 'xmlns' in dataset_value or 'xsi:type' in dataset_value):
-            print(f"  Found XML in 'dataset' field, parsing...")
-            print(f"  XML length: {len(dataset_value)}")
-            
-            # The dataset field contains XML - parse it
-            parsed = _parse_xml_dataconnection(dataset_value)
-            if parsed:
-                # Keep the workspace info from the parent dict if available
-                if 'workspaceConnectionString' in data_connection:
-                    # Use the parent's workspace if the parsed one doesn't have it
-                    if not parsed.get('workspaceConnectionString') or parsed['workspaceConnectionString'] == 'DATABASE=':
-                        parsed['workspaceConnectionString'] = data_connection['workspaceConnectionString']
-                
-                data_connection = parsed
-                print(f"  Replaced data_connection with parsed XML")
+        if isinstance(dataset_value, str) and '<' in dataset_value:
+            parsed_connection = _parse_xml_dataconnection(dataset_value)
+            if parsed_connection:
+                # Use the workspace from the parent dict if the parsed one is incomplete.
+                if 'workspaceConnectionString' in data_connection and parsed_connection.get('workspaceConnectionString') in (None, 'DATABASE='):
+                    parsed_connection['workspaceConnectionString'] = data_connection['workspaceConnectionString']
+                data_connection = parsed_connection
             else:
-                # Parsing failed, but we might still have valid data in the parent dict
-                # Check if we have the other required fields
-                if 'workspaceConnectionString' in data_connection:
-                    print(f"  WARNING: Could not parse XML in dataset field")
-                    print(f"  Will attempt to extract dataset name from XML")
-                    
-                    # Try to extract just the dataset name from the XML
-                    name_match = re.search(r">([^<>]+\.(?:png|tif|tiff|jpg|jpeg|img|sid|ecw))<", dataset_value, re.IGNORECASE)
-                    if name_match:
-                        dataset_name = name_match.group(1).strip()
-                        print(f"  Extracted dataset name: {dataset_name}")
-                        data_connection['dataset'] = dataset_name
-                    else:
-                        # Last resort - look for the layer name with an image extension
-                        possible_name = f"{layer_name}.png"
-                        print(f"  Could not extract dataset name, using: {possible_name}")
-                        data_connection['dataset'] = possible_name
-                else:
-                    raise NotImplementedError(f"Could not parse XML in dataset field and no workspace info available")
-    
-    # Case 3: Unexpected type
-    else:
-        raise RuntimeError(f"Unexpected data_connection type: {type(data_connection)}")
-    
-    # Normalize dictionary keys (handle both lowercase and capitalized)
-    normalized = {}
-    for key, value in data_connection.items():
-        if key == 'WorkspaceConnectionString':
-            normalized['workspaceConnectionString'] = value
-        elif key == 'Dataset':
-            normalized['dataset'] = value
-        elif key == 'WorkspaceFactory':
-            normalized['workspaceFactory'] = value
-        elif key == 'DatasetType':
-            normalized['datasetType'] = value
-        else:
-            normalized[key] = value
-    data_connection = normalized
-    
-    # Validate required keys
-    required_keys = ['workspaceConnectionString', 'dataset', 'workspaceFactory']
-    missing_keys = [k for k in required_keys if k not in data_connection]
-    
-    if missing_keys:
-        raise RuntimeError(f"data_connection missing required keys: {missing_keys}\nAvailable keys: {list(data_connection.keys())}")
-    
-    # Final check: ensure dataset is not XML
-    if '<' in str(data_connection.get('dataset', '')):
-        raise RuntimeError(f"dataset field still contains XML after parsing: {data_connection['dataset'][:100]}...")
-    
-    print(f"  Final data_connection: {data_connection}")
-    
-    # Now call _parse_source with the cleaned data_connection
-    try:
-        (abs_uri, rel_uri), join_info = _parse_source(in_folder, data_connection, "", out_file)
-    except Exception as e:
-        import traceback
-        print(f"  Error in _parse_source: {e}")
-        traceback.print_exc()
-        raise RuntimeError(f"Failed to parse raster source: {e}")
-    
-    print(f"  Absolute URI: {abs_uri}")
-    print(f"  Relative URI: {rel_uri}")
-    
+                 raise RuntimeError(f"Failed to parse XML in 'dataset' field for raster layer: {layer_name}")
+
+    if not isinstance(data_connection, dict):
+        raise RuntimeError(f"Unexpected data_connection type: {type(data_connection)} for layer {layer_name}")
+
+    # Normalize keys (e.g., 'WorkspaceConnectionString' -> 'workspaceConnectionString') for consistency.
+    data_connection = {k[0].lower() + k[1:]: v for k, v in data_connection.items()}
+
+    (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
+
     # Suppress GDAL warnings
+    # Save the current logging setting and redirect logs to a null device.
     gdal_log_file = os.environ.get('CPL_LOG')
     os.environ['CPL_LOG'] = os.devnull
-    
+    rlayer = None
+
     try:
-        # Create the raster layer
+        # Create the raster layer. This is where the warnings are generated.
         rlayer = QgsRasterLayer(abs_uri, layer_name, "gdal")
-        
-        if not rlayer.isValid():
-            # Detailed error reporting
-            if os.path.exists(abs_uri):
-                error_msg = f"Raster file exists but GDAL cannot open it: {abs_uri}"
-            else:
-                error_msg = f"Raster file not found: {abs_uri}"
-                parent = os.path.dirname(abs_uri)
-                if os.path.exists(parent):
-                    try:
-                        files = [f for f in os.listdir(parent) if f.endswith(('.png', '.tif', '.jpg'))][:5]
-                        error_msg += f"\nImage files in directory: {files}"
-                    except:
-                        pass
-            
-            raise RuntimeError(f"Raster layer failed to load: {layer_name}\n{error_msg}")
-        
     finally:
-        # Restore GDAL logging
+        # Restore the original GDAL logging setting, whether the layer loaded successfully or not.
         if gdal_log_file:
             os.environ['CPL_LOG'] = gdal_log_file
         else:
             os.environ.pop('CPL_LOG', None)
-    
-    # Set relative path
+
+    if not rlayer or not rlayer.isValid():
+        error_msg = f"Raster layer failed to load: {layer_name}"
+        if os.path.exists(abs_uri):
+            error_msg += f"\nFile exists at '{abs_uri}' but GDAL could not open it. Check format or permissions."
+        else:
+            error_msg += f"\nFile not found at '{abs_uri}'."
+        raise RuntimeError(error_msg)
+
+    # Prefer a relative path in the saved QLR file for portability.
     try:
-        rlayer.setDataSource(rel_uri, rlayer.name(), rlayer.providerType())
+        test_layer = QgsRasterLayer(rel_uri, "test", "gdal")
+        if test_layer.isValid():
+            rlayer.setDataSource(rel_uri, rlayer.name(), rlayer.providerType())
     except Exception:
-        print(f"  Warning: Could not set relative path for raster layer")
-    
-    # Apply symbology
+        print(f"Warning: Could not set relative path for raster layer '{layer_name}'; using absolute path in QLR.")
+
     apply_raster_symbology(rlayer, layer_def)
-    
-    # Add to project
+    switch_to_relative_path(rlayer, rel_uri)
+
     project.addMapLayer(rlayer, False)
-    print(f"  Successfully converted raster layer: {layer_name}")
-    
     return rlayer
 
 def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> None:
     """
     Exports a .qlr that contains a layer-tree entry with a "checked" (visible) state.
+
+    Why this is needed:
+      - QgsLayerDefinition.exportLayerDefinitionLayers(...) does NOT write any layer tree,
+        so it cannot preserve 'checked' visibility. We must export selected tree nodes instead.
+        (QGIS API: "This is a low-level routine that does not write layer tree.")  # noqa
+      - By creating a temporary layer-tree node (QgsLayerTreeLayer) and calling
+        QgsLayerDefinition.exportLayerDefinition(...), the resulting QLR includes
+        <layer-tree-layer ... checked="Qt::Checked"> (visibility on).  # noqa
+
+    Args:
+        out_layer (QgsMapLayer): the in-memory layer you constructed.
+        layer_def (dict): parsed LYRX layer definition (used to read ArcGIS 'visibility'/'expanded').
+        out_file (str): path to save the .qlr.
     """
     root = QgsProject.instance().layerTreeRoot()
     node = root.findLayer(out_layer.id())
@@ -778,7 +597,47 @@ def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> No
         except Exception as e:
             print(f"  ERROR writing file: {e}")
             raise
+        
+def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, project):
+    """
+    Recursively processes a group layer and its children.
+    """
+    group_name = group_layer_def.get('name', 'group')
+    group_node = QgsLayerTreeGroup(group_name)
 
+    # Set visibility and expanded state for the group itself
+    group_node.setItemVisibilityChecked(bool(group_layer_def.get("visibility", True)))
+    group_node.setExpanded(bool(group_layer_def.get("expanded", False)))
+
+    # Process child layers using the correct key: "layers"
+    for member_uri in group_layer_def.get("layers", []):
+        member_def = next((ld for ld in lyrx_json.get("layerDefinitions", []) if ld.get("uRI") == member_uri), None)
+        if not member_def:
+            continue
+
+        layer_type = member_def.get("type")
+        if layer_type == "CIMGroupLayer":
+            child_group = _convert_group_layer(in_folder, member_def, lyrx_json, out_file, project)
+            group_node.addChildNode(child_group)
+        elif layer_type == "CIMFeatureLayer":
+            child_layer = _convert_feature_layer(in_folder, member_def, out_file, project)
+            _set_metadata(child_layer, member_def)
+            _set_scale_visibility(child_layer, member_def)
+            node = group_node.addLayer(child_layer)
+            if node:
+                node.setItemVisibilityChecked(bool(member_def.get("visibility", True)))
+                node.setExpanded(bool(member_def.get("expanded", False)))
+
+        elif layer_type == 'CIMRasterLayer':
+            child_layer = _convert_raster_layer(in_folder, member_def, out_file, project)
+            _set_metadata(child_layer, member_def)
+            _set_scale_visibility(child_layer, member_def)
+            node = group_node.addLayer(child_layer)
+            if node:
+                node.setItemVisibilityChecked(bool(member_def.get("visibility", True)))
+                node.setExpanded(bool(member_def.get("expanded", False)))
+
+    return group_node
 
 def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
     """Convert an ArcGIS Pro .lyrx file to a QGIS .qlr file"""
@@ -870,48 +729,6 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         project.clear()  # Clear the project instance for the next run
         if manage_qgs:
             qgs.exitQgis()
-    
-
-def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, project):
-    """
-    Recursively processes a group layer and its children.
-    """
-    group_name = group_layer_def.get('name', 'group')
-    group_node = QgsLayerTreeGroup(group_name)
-
-    # Set visibility and expanded state for the group itself
-    group_node.setItemVisibilityChecked(bool(group_layer_def.get("visibility", True)))
-    group_node.setExpanded(bool(group_layer_def.get("expanded", False)))
-
-    # Process child layers using the correct key: "layers"
-    for member_uri in group_layer_def.get("layers", []):
-        member_def = next((ld for ld in lyrx_json.get("layerDefinitions", []) if ld.get("uRI") == member_uri), None)
-        if not member_def:
-            continue
-
-        layer_type = member_def.get("type")
-        if layer_type == "CIMGroupLayer":
-            child_group = _convert_group_layer(in_folder, member_def, lyrx_json, out_file, project)
-            group_node.addChildNode(child_group)
-        elif layer_type == "CIMFeatureLayer":
-            child_layer = _convert_feature_layer(in_folder, member_def, out_file, project)
-            _set_metadata(child_layer, member_def)
-            _set_scale_visibility(child_layer, member_def)
-            node = group_node.addLayer(child_layer)
-            if node:
-                node.setItemVisibilityChecked(bool(member_def.get("visibility", True)))
-                node.setExpanded(bool(member_def.get("expanded", False)))
-
-        elif layer_type == 'CIMRasterLayer':
-            child_layer = _convert_raster_layer(in_folder, member_def, out_file, project)
-            _set_metadata(child_layer, member_def)
-            _set_scale_visibility(child_layer, member_def)
-            node = group_node.addLayer(child_layer)
-            if node:
-                node.setItemVisibilityChecked(bool(member_def.get("visibility", True)))
-                node.setExpanded(bool(member_def.get("expanded", False)))
-
-    return group_node
 
 
 if __name__ == "__main__":
