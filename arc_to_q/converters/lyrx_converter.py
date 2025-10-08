@@ -2,8 +2,9 @@
 
 import json
 import os
+from pathlib import Path
 import re
-from pathlib import Path 
+import io
 
 from qgis.core import (
     QgsApplication,
@@ -17,12 +18,15 @@ from qgis.core import (
     Qgis
 )
 
+
 from arc_to_q.converters.vector.vector_renderer import VectorRenderer
 from arc_to_q.converters.label_converter import set_labels
 from arc_to_q.converters.raster.raster_renderer import (
     apply_raster_symbology,
     switch_to_relative_path,
 )
+
+
 
 def _open_lyrx(lyrx):
     with open(lyrx, 'r', encoding='utf-8') as f:
@@ -142,7 +146,6 @@ def _parse_xml_dataconnection(xml_string: str) -> dict | None:
 
     return None
 
-
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
     """Helper to build absolute and relative URIs for a dataset.
     
@@ -206,7 +209,6 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
 
     return abs_uri, rel_uri
 
-
 def _parse_source(in_folder, data_connection, def_query, out_file):
     """Build both absolute and relative QGIS-friendly URIs for a dataset.
     
@@ -258,7 +260,6 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
         return (abs_uri, rel_uri), join_info
 
     raise NotImplementedError(f"Unsupported dataConnection type: {data_connection.get('type')}")
-
 
 def _set_scale_visibility(layer: QgsVectorLayer, layer_def: dict):
     """Set the scale visibility for a QGIS layer based on the ArcGIS layer definition."""
@@ -430,7 +431,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
     # Set other layer properties
     _set_display_field(layer, layer_def)
     renderer_factory = VectorRenderer()
-    qgis_renderer = renderer_factory.create_renderer(layer_def.get("renderer", {}), layer)
+    qgis_renderer = renderer_factory.create_renderer(layer_def.get("renderer", {}), layer, full_layer_def=layer_def)
     layer.setRenderer(qgis_renderer)
     _set_field_aliases_and_visibility(layer, layer_def)
     set_labels(layer, layer_def)
@@ -439,6 +440,13 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
         raise RuntimeError(f"Layer became invalid after setting properties: {layer_name}")
 
     project.addMapLayer(layer, False)
+
+    root = project.layerTreeRoot()
+    node = root.addLayer(layer)
+    
+    # Set visibility if specified
+    if 'visibility' in layer_def:
+        node.setItemVisibilityChecked(layer_def['visibility'])
     return layer
 
 def _convert_raster_layer(in_folder, layer_def, out_file, project):
@@ -535,7 +543,6 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
     project.addMapLayer(rlayer, False)
     return rlayer
 
-
 def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> None:
     """
     Exports a .qlr that contains a layer-tree entry with a "checked" (visible) state.
@@ -553,25 +560,44 @@ def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> No
         layer_def (dict): parsed LYRX layer definition (used to read ArcGIS 'visibility'/'expanded').
         out_file (str): path to save the .qlr.
     """
-    # Determine visibility and expansion from LYRX (ArcGIS Pro)
-    # In ArcGIS Pro, `visibility` corresponds to whether the item is checked in the Contents pane.
-    visible = bool(layer_def.get("visibility", True))
-    expanded = bool(layer_def.get("expanded", False))
+    root = QgsProject.instance().layerTreeRoot()
+    node = root.findLayer(out_layer.id())
+    if node:
+        # Set visibility before exporting
+        if 'visibility' in layer_def:
+            node.setItemVisibilityChecked(layer_def['visibility'])
 
-    # Build a minimal in-memory layer tree and set visibility
-    root = QgsLayerTreeGroup()                  # temporary root (not tied to a QgsProject)
-    node = root.addLayer(out_layer)             # creates a QgsLayerTreeLayer
-    node.setItemVisibilityChecked(visible)      # <-- the important bit (checked/unchecked)
-    node.setExpanded(expanded)
+        # Export to an in-memory string instead of a file
+        mem_file = io.StringIO()
+        ok, error_message = QgsLayerDefinition.exportLayerDefinition(mem_file, [node])
+        if not ok:
+            raise RuntimeError(f"Failed to export layer definition to memory: {error_message}")
+        
+        # Get the XML string from memory
+        qlr_content = mem_file.getvalue()
+        
+        # Post-process the XML string to inject symbol levels
+        final_qlr_content = VectorRenderer().post_process_qlr_for_symbol_levels(qlr_content, layer_def)
 
-    # Export the QLR including the layer tree node
-    error_message = ""
-    ok, error_message = QgsLayerDefinition.exportLayerDefinition(out_file, [node])
-    if not ok:
-        raise RuntimeError(f"Failed to export layer definition: {error_message}")
-
-
-
+        # Write the final, corrected content to the output file
+        print(f"  Attempting to write to: {out_file}")
+        print(f"  Content length: {len(final_qlr_content)} characters")
+        
+        try:
+            with open(out_file, 'w', encoding='utf-8') as f:
+                f.write(final_qlr_content)
+            print(f"  Successfully wrote file")
+            
+            # Verify the file was created
+            if os.path.exists(out_file):
+                print(f"  File verified to exist at: {out_file}")
+                print(f"  File size: {os.path.getsize(out_file)} bytes")
+            else:
+                print(f"  WARNING: File write succeeded but file doesn't exist!")
+        except Exception as e:
+            print(f"  ERROR writing file: {e}")
+            raise
+        
 def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, project):
     """
     Recursively processes a group layer and its children.
@@ -613,31 +639,19 @@ def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, projec
 
     return group_node
 
-
 def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
-    """Convert an ArcGIS Pro .lyrx file to a QGIS .qlr file
-
-    Args:
-        in_lyrx (str): Path to the input .lyrx file.
-        out_folder (str, optional): Folder to save the output .qlr file. If not provided,
-            the output will be saved in the same folder as the input .lyrx file.
-        qgs (QgsApplication, optional): An initialized QgsApplication instance. If not provided,
-            a new instance will be created and initialized within this function. Even though we
-            might not pass anything to the instance, we still need it for other QGIS objects
-            to be instantiated and function properly.
-    """
+    """Convert an ArcGIS Pro .lyrx file to a QGIS .qlr file"""
+    print(f"Converting {in_lyrx}...")
     if not out_folder:
         out_folder = os.path.dirname(in_lyrx)
     in_folder = os.path.abspath(os.path.dirname(in_lyrx))
     out_file = os.path.join(out_folder, os.path.basename(in_lyrx).replace(".lyrx", ".qlr"))
-
+    
     manage_qgs = qgs is None
     if manage_qgs:
         qgs = QgsApplication([], False)
         qgs.initQgis()
 
-    # Even though we might not pass anything to the instance, we still need it for other QGIS
-    # objects to be instantiated and function properly, particularly wrt symbology.
     project = QgsProject.instance()
 
     try:
@@ -650,7 +664,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         
         layer_type = layer_def.get("type")
         nodes_to_export = []
-
+        
         if layer_type == "CIMGroupLayer":
             root_node = _convert_group_layer(in_folder, layer_def, lyrx, out_file, project)
             nodes_to_export = [root_node]
@@ -658,8 +672,13 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             out_layer = _convert_feature_layer(in_folder, layer_def, out_file, project)
             _set_metadata(out_layer, layer_def)
             _set_scale_visibility(out_layer, layer_def)
-            _export_qlr_with_visibility(out_layer, layer_def, out_file)
-          
+            
+            # Get the layer tree node (it should exist now)
+            root = QgsProject.instance().layerTreeRoot()
+            node = root.findLayer(out_layer.id())
+            if node:
+                nodes_to_export = [node]
+                                
         elif layer_type == 'CIMRasterLayer':
             out_layer = _convert_raster_layer(in_folder, layer_def, out_file, project)
             _set_metadata(out_layer, layer_def)
@@ -674,9 +693,35 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
 
         # Export the QLR including the layer tree node(s)
         if nodes_to_export:
-            ok, error_message = QgsLayerDefinition.exportLayerDefinition(out_file, nodes_to_export)
-            if not ok:
-                raise RuntimeError(f"Failed to export layer definition: {error_message}")
+            # Create a temporary file for initial export
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.qlr', delete=False, encoding='utf-8') as temp_file:
+                temp_path = temp_file.name
+            
+            try:
+                # Export to temporary file
+                ok, error_message = QgsLayerDefinition.exportLayerDefinition(temp_path, nodes_to_export)
+                
+                if not ok:
+                    raise RuntimeError(f"Failed to export layer definition: {error_message}")
+                
+                # Read the XML content from the temp file
+                with open(temp_path, 'r', encoding='utf-8') as f:
+                    qlr_content = f.read()
+                
+                # Post-process for symbol level
+                final_qlr_content = VectorRenderer().post_process_qlr_for_symbol_levels(qlr_content, layer_def)
+                
+                # Write to the actual output file
+                with open(out_file, 'w', encoding='utf-8') as f:
+                    f.write(final_qlr_content)
+                
+            finally:
+                # Clean up the temporary file
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+        print(f"Successfully converted {in_lyrx} to {out_file}")
     except Exception as e:
         print(f"Error converting LYRX: {e}")
         raise
@@ -684,7 +729,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         project.clear()  # Clear the project instance for the next run
         if manage_qgs:
             qgs.exitQgis()
-    
+
 
 if __name__ == "__main__":
     output_folder = r""

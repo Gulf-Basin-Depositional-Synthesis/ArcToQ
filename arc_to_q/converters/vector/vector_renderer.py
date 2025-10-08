@@ -8,6 +8,7 @@ It handles the three main renderer types: Simple, Categorized (Unique Values), a
 from typing import Optional, List, Dict, Any, Union
 import logging
 import re
+import xml.etree.ElementTree as ET
 
 from qgis.core import (
     QgsVectorLayer,
@@ -62,13 +63,15 @@ class VectorRenderer:
     def __init__(self):
         self.symbol_factory = SymbolFactory()
     
-    def create_renderer(self, renderer_def: Dict[str, Any], layer: QgsVectorLayer) -> QgsFeatureRenderer:
+    def create_renderer(self, renderer_def: Dict[str, Any], layer: QgsVectorLayer,
+                        full_layer_def: Optional[Dict[str, Any]] = None) -> Optional[QgsFeatureRenderer]:
         """
         Create a QGIS renderer from an ArcGIS renderer definition.
         
         Args:
             renderer_def: The ArcGIS CIM renderer definition dictionary
             layer: The QGIS vector layer this renderer will be applied to
+            full_layer_def: The complete layer definition (optional, used for symbol level drawing)
             
         Returns:
             QgsFeatureRenderer: The created QGIS renderer
@@ -91,7 +94,7 @@ class VectorRenderer:
             if renderer_type == "CIMSimpleRenderer":
                 return self._create_single_symbol_renderer(renderer_def, layer)
             elif renderer_type == "CIMUniqueValueRenderer":
-                return self._create_categorized_or_rule_based_renderer(renderer_def, layer)
+                return self._create_categorized_or_rule_based_renderer(renderer_def, layer, full_layer_def=full_layer_def)
             elif renderer_type == "CIMClassBreaksRenderer":
                 return self._create_graduated_renderer(renderer_def, layer)
             elif renderer_type == "CIMProportionalRenderer":
@@ -138,7 +141,8 @@ class VectorRenderer:
         return renderer
     
     def _create_categorized_or_rule_based_renderer(self, renderer_def: Dict[str, Any],
-                                                   layer: QgsVectorLayer) -> QgsFeatureRenderer:
+                                                layer: QgsVectorLayer,
+                                                full_layer_def: Optional[Dict[str, Any]] = None) -> QgsFeatureRenderer:
         """
         Decides whether to create a Bivariate, Expression-based, or standard Categorized renderer.
         """
@@ -153,7 +157,7 @@ class VectorRenderer:
 
         else:
             logger.info("No expression or bivariate info, creating standard QGIS Categorized Renderer.")
-            return self._create_categorized_renderer(renderer_def, layer)
+            return self._create_categorized_renderer(renderer_def, layer, full_layer_def=full_layer_def)
     
     
     def _create_bivariate_renderer(self, renderer_def: Dict[str, Any],
@@ -264,7 +268,8 @@ class VectorRenderer:
         return renderer
         
     def _create_categorized_renderer(self, renderer_def: Dict[str, Any],
-                                     layer: QgsVectorLayer) -> QgsCategorizedSymbolRenderer:
+                                    layer: QgsVectorLayer,
+                                    full_layer_def: Optional[Dict[str, Any]] = None) -> QgsCategorizedSymbolRenderer:
         """
         Creates a QGIS categorized renderer from a CIMUniqueValueRenderer definition
         that uses a simple field, not an expression.
@@ -277,6 +282,9 @@ class VectorRenderer:
         if len(field_names) > 1:
             logger.warning(f"Multiple fields found ({field_names}). Only the first, '{field_name}', will be used.")
 
+        # A list to hold tuples of (category, arcgis_symbol_name)
+        categories_with_names = []
+        
         categories = []
         for group in renderer_def.get("groups", []):
             for u_class in group.get("classes", []):
@@ -285,18 +293,41 @@ class VectorRenderer:
                     label = u_class.get("label", str(value))
                     symbol_def = u_class.get("symbol")
                     symbol = self.symbol_factory.create_symbol(symbol_def) or self._create_default_symbol(layer)
-                    categories.append(QgsRendererCategory(value, symbol, label))
+                    
+                    category = QgsRendererCategory(value, symbol, label)
+                    
+                    # Extract the internal ArcGIS name for sorting
+                    arc_symbol_name = symbol_def.get("symbol", {}).get("symbolLayers", [{}])[0].get("name", "")
+                    categories_with_names.append((category, arc_symbol_name))
                 except (KeyError, IndexError):
                     continue
         
-        renderer = QgsCategorizedSymbolRenderer(field_name, categories)
+        if full_layer_def and 'symbolLayerDrawing' in full_layer_def:
+            symbol_layers_order = full_layer_def['symbolLayerDrawing'].get('symbolLayers', [])
+            if symbol_layers_order:
+                # Create a map from the ArcGIS internal name to its drawing order
+                draw_order_map = {s['symbolLayerName']: i for i, s in enumerate(symbol_layers_order)}
+                
+                # Sort the categories based on the drawing order of their internal name
+                # REVERSED so that last ArcGIS item appears first in QGIS
+                categories_with_names.sort(key=lambda item: draw_order_map.get(item[1], -1), reverse=True)
+                
+            else:
+                print("WARNING: 'symbolLayerDrawing' key found, but 'symbolLayers' is empty.")
+
+        renderer = QgsCategorizedSymbolRenderer(field_name)
+        
+        # Add the (now correctly ordered) categories to the renderer
+        for category, _ in categories_with_names:
+            renderer.addCategory(category)
         
         # Handle the default symbol for values that don't match any category
         if renderer_def.get("useDefaultSymbol", False):
             default_symbol_def = renderer_def.get("defaultSymbol")
             if default_symbol_def:
                 default_symbol = self.symbol_factory.create_symbol(default_symbol_def)
-                renderer.setSourceSymbol(default_symbol)
+                if default_symbol:
+                    renderer.setSourceSymbol(default_symbol)
 
         return renderer
     
@@ -714,5 +745,96 @@ class VectorRenderer:
             size_field = renderer_def.get("sizeField")
             if size_field:
                 renderer.setSizeScaleField(size_field)
+    
+    @staticmethod
+    def post_process_qlr_for_symbol_levels(qlr_string: str, layer_def: dict) -> str:
+        """
+        Injects symbol level information and corrects category order in a QLR XML string.
+        This is necessary as the QGIS API does not preserve category order on export.
+        """
+        symbol_drawing_def = layer_def.get('symbolLayerDrawing')
+        if not symbol_drawing_def or not symbol_drawing_def.get('useSymbolLayerDrawing'):
+            return qlr_string
 
+        tree = ET.fromstring(qlr_string)
+        renderer_node = tree.find('.//renderer-v2')
+
+        if renderer_node is None or renderer_node.get('type') != 'categorizedSymbol':
+            return qlr_string
+
+        # 1. Get the ArcGIS drawing order from the LYRX
+        symbol_layers_order = symbol_drawing_def.get('symbolLayers', [])
+        arc_order_map = {s['symbolLayerName']: i for i, s in enumerate(symbol_layers_order)}
+        total_layers = len(symbol_layers_order)
+
+        # 2. Build a map from ArcGIS internal name to the category's XML element
+        renderer_def = layer_def.get('renderer', {})
+        name_to_category_element = {}
+        categories_node = renderer_node.find('categories')
+        if categories_node is None:
+            return qlr_string
+
+        # Create a map from label to the XML element
+        label_to_element_map = {cat.get('label'): cat for cat in categories_node.findall('category')}
+
+        # Link the ArcGIS internal name to its corresponding XML element via the label
+        for group in renderer_def.get("groups", []):
+            for class_item in group.get('classes', []):
+                label = class_item.get("label")
+                symbol_def = class_item.get("symbol", {}).get("symbol", {})
+                arc_symbol_name = symbol_def.get("symbolLayers", [{}])[0].get("name")
+                if label in label_to_element_map:
+                    name_to_category_element[arc_symbol_name] = label_to_element_map[label]
+
+        # 3. Reorder the <category> elements in the XML tree
+        # Sort in REVERSE order so that the last ArcGIS item becomes position 0 in QGIS
+        sorted_categories = sorted(name_to_category_element.items(), 
+                                key=lambda item: arc_order_map.get(item[0], -1), 
+                                reverse=True)
+        
+        # Remove all existing categories and re-add in correct order
+        existing_categories = list(categories_node)
+        for cat in existing_categories:
+            categories_node.remove(cat)
+        
+        for _, element in sorted_categories:
+            categories_node.append(element)
+
+        # 4. Enable symbol levels and generate the <symbollevels> block
+        renderer_node.set('symbollevels', '1')
+        
+        # Remove existing symbollevels node if it exists
+        existing_symbollevels = renderer_node.find('symbollevels')
+        if existing_symbollevels is not None:
+            renderer_node.remove(existing_symbollevels)
+        
+        symbollevels_node = ET.SubElement(renderer_node, 'symbollevels')
+        
+        # Remap label to ID after reordering
+        label_to_id_map = {}
+        for cat_node in categories_node.findall('category'):
+            label = cat_node.get('label')
+            symbol_name = cat_node.get('symbol')
+            symbol_node = renderer_node.find(f".//symbols/symbol[@name='{symbol_name}']")
+            if label and symbol_node is not None:
+                layer_node = symbol_node.find('layer')
+                if layer_node is not None:
+                    label_to_id_map[label] = layer_node.get('id')
+        
+        # Generate symbol level entries
+        for i, (arc_name, _) in enumerate(sorted_categories):
+            # Find the label associated with the current arc_name
+            label = next((ci.get("label") for g in renderer_def.get("groups", []) for ci in g.get('classes', [])
+                        if ci.get("symbol", {}).get("symbol", {}).get("symbolLayers", [{}])[0].get("name") == arc_name), None)
+            
+            symbol_id = label_to_id_map.get(label)
+            
+            if symbol_id:
+                # Position in reversed list = rank (higher rank draws on top in QGIS)
+                rank = i
+                ET.SubElement(symbollevels_node, 'symbollevel', {
+                    'id': symbol_id, 'level': str(rank), 'pass': '0', 'locked': '0'
+                })
+        
+        return ET.tostring(tree, encoding='unicode')
 
