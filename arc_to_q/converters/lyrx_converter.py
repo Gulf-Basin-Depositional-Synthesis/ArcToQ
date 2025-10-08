@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import re
 import io
-import xml.etree.ElementTree as ET
 
 from qgis.core import (
     QgsApplication,
@@ -738,71 +737,6 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
     
     return rlayer
 
-def _post_process_qlr_for_symbol_levels(qlr_string: str, layer_def: dict) -> str:
-        """
-        Injects symbol level information into a QLR XML string.
-
-        This function is necessary for QGIS 3.4, where the PyQGIS API
-        does not expose methods to set symbol levels directly.
-
-        Args:
-            qlr_string: The XML content of the QLR file as a string.
-            layer_def: The full ArcGIS layer definition dictionary.
-
-        Returns:
-            The modified XML string with symbol level information.
-        """
-        # Check if symbol level drawing is used in the source .lyrx
-        symbol_drawing_def = layer_def.get('symbolLayerDrawing')
-        if not symbol_drawing_def or not symbol_drawing_def.get('useSymbolLayerDrawing'):
-            return qlr_string
-
-        print("\n--- Post-processing QLR for Symbol Level Drawing ---")
-        tree = ET.fromstring(qlr_string)
-        renderer_node = tree.find('.//renderer-v2')
-
-        if renderer_node is None or renderer_node.get('type') != 'categorizedSymbol':
-            print("Renderer not found or not categorized. Skipping.")
-            return qlr_string
-
-        # 1. Enable Symbol Levels on the renderer tag
-        renderer_node.set('symbollevels', '1')
-        print("Set symbollevels=\"1\" on renderer tag.")
-
-        # 2. Create the <symbollevels> block
-        symbollevels_node = ET.SubElement(renderer_node, 'symbollevels')
-
-        # 3. Map symbol indices to their unique symbol layer IDs from the XML
-        id_map = {}
-        for i, symbol_node in enumerate(renderer_node.findall('.//symbol')):
-            layer_node = symbol_node.find('layer')
-            if layer_node is not None:
-                id_map[i] = layer_node.get('id')
-
-        # 4. Get the ArcGIS draw order
-        symbol_layers_order = symbol_drawing_def.get('symbolLayers', [])
-        total_layers = len(symbol_layers_order)
-
-        # 5. Create a <symbollevel> entry for each category based on sequential mapping
-        print("Generating <symbollevel> entries...")
-        for i in range(total_layers):
-            # The topmost layer in ArcGIS (index 0) gets the highest rank in QGIS
-            rank = total_layers - 1 - i
-            symbol_id = id_map.get(i)
-            
-            if symbol_id:
-                ET.SubElement(symbollevels_node, 'symbollevel', {
-                    'id': symbol_id,
-                    'level': str(rank),
-                    'pass': '0',
-                    'locked': '0',
-                    'type': 'fill' # Assuming fill symbols
-                })
-                print(f"  - Mapped Symbol Index {i} (ID: {symbol_id}) to Rank {rank}")
-
-        print("--- Finished Post-processing ---\n")
-        return ET.tostring(tree, encoding='unicode')
-
 def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> None:
     """
     Exports a .qlr that contains a layer-tree entry with a "checked" (visible) state.
@@ -824,7 +758,7 @@ def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> No
         qlr_content = mem_file.getvalue()
         
         # Post-process the XML string to inject symbol levels
-        final_qlr_content = _post_process_qlr_for_symbol_levels(qlr_content, layer_def)
+        final_qlr_content = VectorRenderer().post_process_qlr_for_symbol_levels(qlr_content, layer_def)
 
         # Write the final, corrected content to the output file
         print(f"  Attempting to write to: {out_file}")
@@ -854,9 +788,6 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
     in_folder = os.path.abspath(os.path.dirname(in_lyrx))
     out_file = os.path.join(out_folder, os.path.basename(in_lyrx).replace(".lyrx", ".qlr"))
     
-    print(f"DEBUG: out_file = {out_file}")  # ADD THIS
-    print(f"DEBUG: out_folder exists? {os.path.exists(out_folder)}")  # ADD THIS
-
     manage_qgs = qgs is None
     if manage_qgs:
         qgs = QgsApplication([], False)
@@ -875,8 +806,6 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         layer_type = layer_def.get("type")
         nodes_to_export = []
         
-        print(f"DEBUG: layer_type = {layer_type}")  # ADD THIS
-
         if layer_type == "CIMGroupLayer":
             root_node = _convert_group_layer(in_folder, layer_def, lyrx, out_file, project)
             nodes_to_export = [root_node]
@@ -904,13 +833,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             raise Exception(f"Unhandled layer type: {layer_type}")
 
         # Export the QLR including the layer tree node(s)
-        print(f"DEBUG: nodes_to_export length = {len(nodes_to_export)}")  # ADD THIS
-        
-        # Export the QLR including the layer tree node(s)
-        # Export the QLR including the layer tree node(s)
         if nodes_to_export:
-            print(f"DEBUG: About to export to temp file")
-            
             # Create a temporary file for initial export
             import tempfile
             with tempfile.NamedTemporaryFile(mode='w', suffix='.qlr', delete=False, encoding='utf-8') as temp_file:
@@ -919,7 +842,6 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             try:
                 # Export to temporary file
                 ok, error_message = QgsLayerDefinition.exportLayerDefinition(temp_path, nodes_to_export)
-                print(f"DEBUG: Export ok? {ok}, error: {error_message}")
                 
                 if not ok:
                     raise RuntimeError(f"Failed to export layer definition: {error_message}")
@@ -927,24 +849,18 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
                 # Read the XML content from the temp file
                 with open(temp_path, 'r', encoding='utf-8') as f:
                     qlr_content = f.read()
-                print(f"DEBUG: Content length: {len(qlr_content)}")
                 
-                # Post-process for symbol levels
-                final_qlr_content = _post_process_qlr_for_symbol_levels(qlr_content, layer_def)
-                print(f"DEBUG: Final content length: {len(final_qlr_content)}")
+                # Post-process for symbol level
+                final_qlr_content = VectorRenderer().post_process_qlr_for_symbol_levels(qlr_content, layer_def)
                 
                 # Write to the actual output file
-                print(f"DEBUG: Writing to {out_file}")
                 with open(out_file, 'w', encoding='utf-8') as f:
                     f.write(final_qlr_content)
-                print(f"DEBUG: File written, exists? {os.path.exists(out_file)}")
                 
             finally:
                 # Clean up the temporary file
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
-        else:
-            print(f"DEBUG: nodes_to_export is empty, skipping export")
 
         print(f"Successfully converted {in_lyrx} to {out_file}")
     except Exception as e:

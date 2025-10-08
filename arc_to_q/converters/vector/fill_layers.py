@@ -6,13 +6,15 @@ import logging
 import base64
 import tempfile
 import os
+import hashlib
+from pathlib import Path
 from typing import Optional, Dict, Any
 
 from qgis.core import (
     QgsMarkerSymbol, QgsPointPatternFillSymbolLayer, QgsSimpleFillSymbolLayer,
     QgsRasterFillSymbolLayer, QgsSymbolLayer, QgsUnitTypes
 )
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QByteArray, QBuffer, QIODevice
 from qgis.PyQt.QtGui import QColor, QImage
 
 from arc_to_q.converters.utils import parse_color
@@ -109,70 +111,82 @@ def _create_point_pattern_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsP
         logger.error(f"Failed to create point pattern fill layer: {e}")
         return None
 
-
 def _create_picture_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsSymbolLayer]:
-        """
-        Creates a QGIS Picture Fill from a CIMPictureFill definition,
-        processing color substitutions to handle custom colors and transparency.
-        """
-        try:
-            url_string = layer_def.get("url", "")
-            if not url_string.startswith("data:image/bmp;base64,"):
-                logger.warning(f"Unsupported picture fill format: {url_string[:30]}")
-                return None
-
-            # Decode the base64 data
-            base64_data = url_string.split(",")[1]
-            image_data = base64.b64decode(base64_data)
-
-            # Load the original image data into a QImage object
-            image = QImage()
-            image.loadFromData(image_data, 'BMP')
-
-            # Process color substitutions if they exist
-            substitutions = layer_def.get("colorSubstitutions", [])
-            if substitutions:
-                # Create a mapping from old RGB tuples to new QColor objects
-                color_map = {}
-                for sub in substitutions:
-                    old_color_vals = sub.get("oldColor", {}).get("values")
-                    new_color_def = sub.get("newColor", {})
-                    if old_color_vals and new_color_def:
-                        # Use only RGB for the key, as source is likely 24-bit
-                        old_color_rgb = tuple(old_color_vals[:3])
-                        qgis_new_color = parse_color(new_color_def)
-                        if qgis_new_color:
-                            color_map[old_color_rgb] = qgis_new_color
-                
-                if color_map:
-                    # Convert image to a format that supports an alpha channel for transparency
-                    image = image.convertToFormat(QImage.Format_ARGB32)
-
-                    # Iterate through each pixel and apply the color substitution
-                    for x in range(image.width()):
-                        for y in range(image.height()):
-                            pixel_color = QColor(image.pixel(x, y))
-                            pixel_rgb = (pixel_color.red(), pixel_color.green(), pixel_color.blue())
-                            if pixel_rgb in color_map:
-                                image.setPixelColor(x, y, color_map[pixel_rgb])
-
-            # Save the (potentially modified) image to a temporary PNG file to preserve transparency
-            temp_dir = tempfile.gettempdir()
-            file_path = os.path.join(temp_dir, "temp_arc_symbol.png") # Use PNG for transparency
-            image.save(file_path, "PNG")
-
-            # Instantiate the raster fill layer with the path to our new PNG
-            picture_layer = QgsRasterFillSymbolLayer(file_path)
-
-            # Set image size properties from the CIM definition
-            image_width = layer_def.get("height", 32.0)
-            picture_layer.setWidth(image_width)
-            picture_layer.setWidthUnit(QgsUnitTypes.RenderPoints)
-
-            return picture_layer
-        except Exception as e:
-            logger.error(f"Failed to create picture fill layer: {e}")
+    """
+    Creates a QGIS Picture Fill from a CIMPictureFill definition,
+    processing color substitutions to handle custom colors and transparency.
+    """
+    try:
+        url_string = layer_def.get("url", "")
+        
+        if not url_string.startswith("data:image/bmp;base64,"):
+            logger.warning(f"Unsupported picture fill format: {url_string[:30]}")
             return None
+
+        # Decode the base64 data
+        base64_data = url_string.split(",")[1]
+        image_data = base64.b64decode(base64_data)
+
+        # Load the original image data into a QImage object
+        image = QImage()
+        if not image.loadFromData(image_data, 'BMP'):
+            logger.error("Failed to load BMP image data")
+            return None
+
+        # Process color substitutions if they exist
+        substitutions = layer_def.get("colorSubstitutions", [])
+        
+        if substitutions:
+            # Create a mapping from old RGB tuples to new QColor objects
+            color_map = {}
+            for sub in substitutions:
+                old_color_vals = sub.get("oldColor", {}).get("values")
+                new_color_def = sub.get("newColor", {})
+                if old_color_vals and new_color_def:
+                    # Use only RGB for the key, as source is likely 24-bit
+                    old_color_rgb = tuple(old_color_vals[:3])
+                    qgis_new_color = parse_color(new_color_def)
+                    if qgis_new_color:
+                        color_map[old_color_rgb] = qgis_new_color
+            
+            if color_map:
+                # Convert image to a format that supports an alpha channel for transparency
+                image = image.convertToFormat(QImage.Format_ARGB32)
+
+                # Iterate through each pixel and apply the color substitution
+                for x in range(image.width()):
+                    for y in range(image.height()):
+                        pixel_color = QColor(image.pixel(x, y))
+                        pixel_rgb = (pixel_color.red(), pixel_color.green(), pixel_color.blue())
+                        if pixel_rgb in color_map:
+                            image.setPixelColor(x, y, color_map[pixel_rgb])
+
+        # Convert image to PNG in memory and encode as base64
+        byte_array = QByteArray()
+        buffer = QBuffer(byte_array)
+        buffer.open(QIODevice.WriteOnly)
+        image.save(buffer, "PNG")
+        buffer.close()
+        
+        # Convert to base64
+        png_base64 = byte_array.toBase64().data().decode('utf-8')
+        
+        # Create data URI for embedding in the layer
+        data_uri = f"base64:{png_base64}"
+
+        # Create the raster fill layer with embedded data URI
+        picture_layer = QgsRasterFillSymbolLayer(data_uri)
+
+        # Set image size properties from the CIM definition
+        image_width = layer_def.get("height", 32.0)
+        picture_layer.setWidth(image_width)
+        picture_layer.setWidthUnit(QgsUnitTypes.RenderPoints)
+        
+        return picture_layer
+        
+    except Exception as e:
+        logger.error(f"Failed to create picture fill layer: {e}")
+        return None
 
 
 def create_default_fill_layer() -> QgsSimpleFillSymbolLayer:
