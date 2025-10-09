@@ -88,11 +88,11 @@ def create_character_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMa
             rot_adj, y_offset_adj = CHAR_ADJUSTMENTS[char_code]
             if rot_adj != 0:
                 sub_symbol_layer.setAngle(sub_symbol_layer.angle() + rot_adj)
-                print(f"Applied manual rotation adjustment: +{rot_adj}° for char {char_code}")
+                #print(f"Applied manual rotation adjustment: +{rot_adj}° for char {char_code}")
             if y_offset_adj != 0:
                 current_offset = sub_symbol_layer.offset()
                 sub_symbol_layer.setOffset(QPointF(current_offset.x(), current_offset.y() + y_offset_adj))
-                print(f"Applied manual Y offset adjustment: +{y_offset_adj} for char {char_code}")
+                #print(f"Applied manual Y offset adjustment: +{y_offset_adj} for char {char_code}")
         
         marker_symbol = QgsMarkerSymbol([sub_symbol_layer])
         return _create_marker_line_layers_from_sub_symbol(marker_symbol, layer_def)
@@ -103,7 +103,7 @@ def create_character_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMa
 
 def create_vector_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMarkerLineSymbolLayer]:
     """Creates QGIS Marker Line layers from an ArcGIS CIMVectorMarker on a line."""
-    print(f"\n@@@ VECTOR MARKER: size={layer_def.get('size')}, rotation={layer_def.get('rotation')}, interval={layer_def.get('markerPlacement', {}).get('placementTemplate')}")
+    #print(f"\n@@@ VECTOR MARKER: size={layer_def.get('size')}, rotation={layer_def.get('rotation')}, interval={layer_def.get('markerPlacement', {}).get('placementTemplate')}")
     try:
         sub_symbol = QgsMarkerSymbol()
         sub_symbol.deleteSymbolLayer(0)
