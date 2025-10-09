@@ -147,54 +147,54 @@ def _parse_xml_dataconnection(xml_string: str) -> dict | None:
     return None
 
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
-    """Helper to build absolute and relative URIs for a dataset.
-    
-    Args:
-        in_folder (str): Path to the folder containing the .lyrx file.
-        conn_str (str): The workspace connection string from the .lyrx file.
-        factory (str): The workspace factory type (e.g. "FileGDB", "Shapefile").
-        dataset (str): The dataset name (e.g. feature class or table name).
-        dataset_type (str): The dataset type (e.g. "esriDTRasterDataset", "esriDTFeatureClass").
-        def_query (str): The definition query string to append to the URI (or empty string).
-            The query should already be in QGIS-compatible format, including the leading "|subset=".
-        out_file (str): Path to the converted QGIS .qlr file.
-
-    Returns:
-        tuple: (abs_uri, rel_uri)
-          - abs_uri: Absolute QGIS URI for the dataset
-          - rel_uri: Relative QGIS URI for the dataset
-    """
     if "=" in conn_str:
         _, raw_path = conn_str.split("=", 1)
     else:
         raw_path = conn_str
 
     lyrx_dir = Path(in_folder)
-    abs_path = (lyrx_dir / raw_path).resolve()
+    
+    # Build absolute path
+    abs_path = (lyrx_dir / raw_path).absolute()
+    abs_path = Path(os.path.normpath(str(abs_path)))  # <-- ADD THIS LINE
+    
+    # If the path starts with a UNC path on Windows, try to get it back to a drive letter
+    if os.name == 'nt' and str(abs_path).startswith('\\\\'):
+        if len(in_folder) > 1 and in_folder[1] == ':':
+            drive = in_folder[0:2]
+            abs_path = Path(drive) / raw_path
+            abs_path = abs_path.absolute()
+            abs_path = Path(os.path.normpath(str(abs_path)))  # <-- ADD THIS LINE
 
-    # Absolute URI
+    # Absolute URI - use forward slashes consistently
     if factory == "FileGDB":
         if dataset_type == "esriDTFeatureClass":
             abs_uri = f"{abs_path.as_posix()}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
-            abs_uri = os.path.join(abs_path.as_posix(), dataset)
+            abs_uri = f"{abs_path.as_posix()}/{dataset}"
         else:
             raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
-        abs_uri = os.path.join(abs_path.as_posix(), dataset)
+        abs_uri = f"{abs_path.as_posix()}/{dataset}"
 
     # Relative URI
-    out_dir = Path(out_file).parent.resolve()
-    rel_path = Path(os.path.relpath(abs_path, start=out_dir))
+    out_dir = Path(out_file).parent.absolute()
+    out_dir = Path(os.path.normpath(str(out_dir)))  # <-- ADD THIS LINE
+    
+    try:
+        rel_path = Path(os.path.relpath(abs_path, start=out_dir))
+    except ValueError:
+        rel_path = abs_path
+    
     if factory == "FileGDB":
         if dataset_type == "esriDTFeatureClass":
             rel_uri = f"{rel_path.as_posix()}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
-            rel_uri = os.path.join(rel_path.as_posix(), dataset)
+            rel_uri = f"{rel_path.as_posix()}/{dataset}"
         else:
             raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
-        rel_uri = os.path.join(rel_path.as_posix(), dataset)
+        rel_uri = f"{rel_path.as_posix()}/{dataset}"
 
     if dataset_type == "esriDTFeatureClass":
         if factory == "Shapefile":
@@ -208,6 +208,7 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
             rel_uri += def_query
 
     return abs_uri, rel_uri
+
 
 def _parse_source(in_folder, data_connection, def_query, out_file):
     """Build both absolute and relative QGIS-friendly URIs for a dataset.
