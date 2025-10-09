@@ -400,7 +400,9 @@ class QgzBuilder:
     
     def _build_layer_tree(self, layers_data, qgs_parent_node, aprx_dir, output_folder):
         """Recursively build layer tree."""
-        for layer_data in layers_data:
+        # Reverse the order so layers appear in the same order as ArcGIS
+        # (QGIS adds layers from bottom to top)
+        for layer_data in reversed(layers_data):
             if layer_data["is_group"]:
                 print(f"    Creating group: {layer_data['name']}")
                 group_node = qgs_parent_node.addGroup(layer_data["name"])
