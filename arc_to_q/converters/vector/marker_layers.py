@@ -9,8 +9,8 @@ from qgis.core import (
     QgsFontMarkerSymbolLayer,
     QgsUnitTypes,
 )
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import Qt, QPointF
+from qgis.PyQt.QtGui import QColor, QFontMetrics, QFont
 
 from arc_to_q.converters.utils import parse_color
 
@@ -40,31 +40,68 @@ def create_simple_marker_from_vector(layer_def: Dict[str, Any]) -> Optional[QgsS
         size = layer_def.get("size", 6.0)
         shape = _determine_marker_shape(layer_def)
         rotation = layer_def.get("rotation", 0.0)
+        
+        # Check if this is a line-based marker (like escarpment ticks)
+        graphic = layer_def.get("markerGraphics", [{}])[0]
+        geometry = graphic.get("geometry", {})
+        is_line_marker = "paths" in geometry
+        
+        #print(f"Vector marker: shape={shape}, size={size}, rotation={rotation}, is_line={is_line_marker}")
+        
+        # For line markers with angleToLine, rotation needs adjustment ??
+        marker_placement = layer_def.get("markerPlacement", {})
+        angle_to_line = marker_placement.get("angleToLine", False)
+        
+        if is_line_marker and angle_to_line:
+            rotation = 0
+        
         marker_layer.setSize(size)
         marker_layer.setSizeUnit(QgsUnitTypes.RenderPoints)
         marker_layer.setShape(shape)
         marker_layer.setAngle(rotation)
+        
+        #print(f"Set marker: shape={shape}, size={size}, angle={rotation}°")
 
-        graphic = layer_def.get("markerGraphics", [{}])[0]
         graphic_symbol_layers = graphic.get("symbol", {}).get("symbolLayers", [])
         fill_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidFill"), None)
         stroke_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidStroke"), None)
 
-        if fill_def and (fill_color := parse_color(fill_def.get("color"))) and fill_color.alpha() > 0:
-            marker_layer.setColor(fill_color)
-        else:
-            marker_layer.setColor(QColor(0, 0, 0, 0))  # Transparent
+        has_fill = False
+        if fill_def and (fill_color := parse_color(fill_def.get("color"))):
+            if fill_color.alpha() > 0:
+                marker_layer.setColor(fill_color)
+                has_fill = True
 
+        has_stroke = False
         if stroke_def and (stroke_color := parse_color(stroke_def.get("color"))) and (stroke_width := stroke_def.get("width", 0.26)) > 0:
+            if shape in (QgsSimpleMarkerSymbolLayer.Line, QgsSimpleMarkerSymbolLayer.Cross):
+                marker_layer.setColor(stroke_color)
+                marker_layer.setStrokeStyle(Qt.NoPen)  # No outline
+                #print(f"Line/Cross shape: using stroke color {stroke_color.name()} as fill")
+                has_fill = True
+            else:
+                marker_layer.setStrokeStyle(Qt.SolidLine)
+                marker_layer.setStrokeColor(stroke_color)
+                marker_layer.setStrokeWidth(stroke_width)
+                marker_layer.setStrokeWidthUnit(QgsUnitTypes.RenderPoints)
+                #print(f"Normal shape stroke: color={stroke_color.name()}, width={stroke_width}")
+            has_stroke = True
+        
+        if not has_fill and not has_stroke:
+            # Fallback to a default visible marker
+            marker_layer.setColor(QColor("red"))
+            marker_layer.setStrokeColor(QColor("black"))
+            marker_layer.setStrokeWidth(0.2)
             marker_layer.setStrokeStyle(Qt.SolidLine)
-            marker_layer.setStrokeColor(stroke_color)
-            marker_layer.setStrokeWidth(stroke_width)
-            marker_layer.setStrokeWidthUnit(QgsUnitTypes.RenderPoints)
-        else:
+            #print(f"Applied fallback colors")
+        elif not has_fill:
+            marker_layer.setColor(QColor(0, 0, 0, 0)) # transparent fill
+        elif not has_stroke:
             marker_layer.setStrokeStyle(Qt.NoPen)
 
         return marker_layer
     except Exception as e:
+        print(f"ERROR in create_simple_marker_from_vector: {e}")
         logger.error(f"Failed to create simple marker from vector: {e}")
         return None
 
@@ -74,7 +111,7 @@ def create_font_marker_from_character(layer_def: Dict[str, Any]) -> Optional[Qgs
     try:
         font_layer = QgsFontMarkerSymbolLayer()
         font_family = layer_def.get("fontFamilyName", "Arial")
-        character_code = layer_def.get("characterIndex", 32)  # Default to space
+        character_code = layer_def.get("characterIndex", 63)  # Default to '?'
         character = chr(character_code)
 
         color = QColor("black")
@@ -110,6 +147,23 @@ def _determine_marker_shape(layer_def: Dict[str, Any]) -> QgsSimpleMarkerSymbolL
         return MARKER_SHAPE_MAP[shape_name]
 
     geometry = graphic.get("geometry", {})
+    
+    if "paths" in geometry:
+        paths = geometry["paths"]
+        if paths and len(paths) > 0:
+            path = paths[0]
+            # Check if it's a simple horizontal or vertical line
+            if len(path) == 2:
+                p1, p2 = path[0], path[1]
+                # If it's horizontal or vertical, it should work as a line marker
+                is_horizontal = p1[1] == p2[1]
+                is_vertical = p1[0] == p2[0]
+                if is_horizontal or is_vertical:
+                    #print(f"Detected simple line marker - using Cross shape as workaround")
+                    return QgsSimpleMarkerSymbolLayer.Cross  # Use Cross, we'll rotate it
+        #print(f"Detected line marker (paths geometry) - using Line shape")
+        return QgsSimpleMarkerSymbolLayer.Line
+    
     if "rings" in geometry:
         points = geometry["rings"][0]
         point_count = len(points)

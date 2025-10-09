@@ -750,67 +750,67 @@ class VectorRenderer:
     def post_process_qlr_for_symbol_levels(qlr_string: str, layer_def: dict) -> str:
         """
         Injects symbol level information and corrects category order in a QLR XML string.
-        This is necessary as the QGIS API does not preserve category order on export.
+        This version fixes a bug where categories sharing an internal symbol name were being overwritten.
         """
         symbol_drawing_def = layer_def.get('symbolLayerDrawing')
         if not symbol_drawing_def or not symbol_drawing_def.get('useSymbolLayerDrawing'):
             return qlr_string
 
-        tree = ET.fromstring(qlr_string)
-        renderer_node = tree.find('.//renderer-v2')
+        try:
+            tree = ET.fromstring(qlr_string)
+        except ET.ParseError as e:
+            logger.error(f"Failed to parse QLR XML: {e}")
+            return qlr_string # Return original string if XML is invalid
 
+        renderer_node = tree.find('.//renderer-v2')
         if renderer_node is None or renderer_node.get('type') != 'categorizedSymbol':
             return qlr_string
 
-        # 1. Get the ArcGIS drawing order from the LYRX
+        # 1. Get the ArcGIS drawing order and renderer definition
         symbol_layers_order = symbol_drawing_def.get('symbolLayers', [])
         arc_order_map = {s['symbolLayerName']: i for i, s in enumerate(symbol_layers_order)}
-        total_layers = len(symbol_layers_order)
-
-        # 2. Build a map from ArcGIS internal name to the category's XML element
         renderer_def = layer_def.get('renderer', {})
-        name_to_category_element = {}
         categories_node = renderer_node.find('categories')
+
         if categories_node is None:
             return qlr_string
 
-        # Create a map from label to the XML element
+        # 2. Build a list of tuples: (XML_element, arc_symbol_name) for all categories found
         label_to_element_map = {cat.get('label'): cat for cat in categories_node.findall('category')}
-
-        # Link the ArcGIS internal name to its corresponding XML element via the label
+        
+        all_categories_with_names = []
         for group in renderer_def.get("groups", []):
             for class_item in group.get('classes', []):
                 label = class_item.get("label")
                 symbol_def = class_item.get("symbol", {}).get("symbol", {})
                 arc_symbol_name = symbol_def.get("symbolLayers", [{}])[0].get("name")
+                
                 if label in label_to_element_map:
-                    name_to_category_element[arc_symbol_name] = label_to_element_map[label]
+                    element = label_to_element_map[label]
+                    all_categories_with_names.append((element, arc_symbol_name))
 
-        # 3. Reorder the <category> elements in the XML tree
-        # Sort in REVERSE order so that the last ArcGIS item becomes position 0 in QGIS
-        sorted_categories = sorted(name_to_category_element.items(), 
-                                key=lambda item: arc_order_map.get(item[0], -1), 
-                                reverse=True)
+        # 3. Sort this list based on the ArcGIS drawing order map
+        # Sorting is REVERSED because QGIS layer order is a stack (last item is on top)
+        sorted_categories = sorted(all_categories_with_names, 
+                                   key=lambda item: arc_order_map.get(item[1], -1), 
+                                   reverse=True)
         
-        # Remove all existing categories and re-add in correct order
-        existing_categories = list(categories_node)
-        for cat in existing_categories:
-            categories_node.remove(cat)
-        
-        for _, element in sorted_categories:
+        # 4. Rebuild the <categories> node in the correct order
+        # This is the key fix: It re-adds all categories in the right order without losing any.
+        categories_node.clear() # Remove all existing category elements
+        for element, _ in sorted_categories:
             categories_node.append(element)
 
-        # 4. Enable symbol levels and generate the <symbollevels> block
+        # 5. Enable and generate the <symbollevels> block based on the new, correct order
         renderer_node.set('symbollevels', '1')
         
-        # Remove existing symbollevels node if it exists
         existing_symbollevels = renderer_node.find('symbollevels')
         if existing_symbollevels is not None:
             renderer_node.remove(existing_symbollevels)
         
         symbollevels_node = ET.SubElement(renderer_node, 'symbollevels')
         
-        # Remap label to ID after reordering
+        # Map labels to symbol IDs from the XML
         label_to_id_map = {}
         for cat_node in categories_node.findall('category'):
             label = cat_node.get('label')
@@ -820,21 +820,17 @@ class VectorRenderer:
                 layer_node = symbol_node.find('layer')
                 if layer_node is not None:
                     label_to_id_map[label] = layer_node.get('id')
-        
-        # Generate symbol level entries
-        for i, (arc_name, _) in enumerate(sorted_categories):
-            # Find the label associated with the current arc_name
-            label = next((ci.get("label") for g in renderer_def.get("groups", []) for ci in g.get('classes', [])
-                        if ci.get("symbol", {}).get("symbol", {}).get("symbolLayers", [{}])[0].get("name") == arc_name), None)
-            
+
+        # Generate symbol level entries based on the newly sorted categories
+        for i, (element, _) in enumerate(sorted_categories):
+            label = element.get('label')
             symbol_id = label_to_id_map.get(label)
             
             if symbol_id:
-                # Position in reversed list = rank (higher rank draws on top in QGIS)
-                rank = i
+                rank = i  # The rank is its position in the sorted list
                 ET.SubElement(symbollevels_node, 'symbollevel', {
                     'id': symbol_id, 'level': str(rank), 'pass': '0', 'locked': '0'
                 })
-        
+
         return ET.tostring(tree, encoding='unicode')
 
