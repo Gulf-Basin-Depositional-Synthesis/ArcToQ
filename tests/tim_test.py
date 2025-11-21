@@ -1,7 +1,7 @@
 """Tim's testing script.
     PowerShell
     CD to ArcToQ folder
-    & "C:\Program Files\QGIS 3.40.10\bin\python-qgis-ltr.bat" .\tests\tim_test.py
+    & "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" .\tests\tim_test.py
 """
 
 import sys
@@ -48,7 +48,7 @@ if __name__ == "__main__":
 
     layers = [
         pgeo,
-        # well_lyrx,
+        well_lyrx,
         # plss_lyrx,
         # tops_all_wells,
         # mag,
@@ -61,18 +61,17 @@ if __name__ == "__main__":
         # depo,
     ]
 
-    # layers = _get_lyrx_in_folder(r'G:\Current_Database\Map_Layers', False)
+    layers = sorted(_get_lyrx_in_folder(r'G:\Current_Database\Map_Layers_Test\Basemap', False))
 
     qgs = QgsApplication([], False)
     qgs.initQgis()
 
-    try:
-        for lyrx in layers:
-            print(f"Processing {lyrx}...")
+    for lyrx in layers:
+        print(f"\nProcessing {lyrx}...")
+        try:
             convert_lyrx(lyrx, output_folder, qgs)
-    except Exception as e:
-        print(f"oops: {e}")
-    finally:
-        qgs.exitQgis()
+        except Exception as e:
+            print(f"oops: {e}")
 
+    qgs.exitQgis()
     print('done')

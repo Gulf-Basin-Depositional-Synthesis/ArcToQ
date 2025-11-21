@@ -10,6 +10,7 @@ from qgis.core import (
     QgsApplication,
     QgsVectorLayer,
     QgsRasterLayer,
+    QgsMapLayer,
     QgsVirtualLayerDefinition,
     QgsLayerDefinition,
     QgsReadWriteContext,
@@ -261,7 +262,15 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
 
     raise NotImplementedError(f"Unsupported dataConnection type: {data_connection.get('type')}")
 
-def _set_scale_visibility(layer: QgsVectorLayer, layer_def: dict):
+
+def _set_layer_transparency(layer: QgsMapLayer, layer_def: dict):
+    """Set the transparency for a QGIS layer based on the ArcGIS layer definition."""
+    transparency = layer_def.get("transparency", 0)
+    if transparency:
+        layer.setOpacity(1 - (transparency / 100.0))
+
+
+def _set_scale_visibility(layer: QgsMapLayer, layer_def: dict):
     """Set the scale visibility for a QGIS layer based on the ArcGIS layer definition."""
     scale_opts = layer_def.get("layerScaleVisibilityOptions", {})
     if scale_opts:
@@ -623,6 +632,7 @@ def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, projec
             child_layer = _convert_feature_layer(in_folder, member_def, out_file, project)
             _set_metadata(child_layer, member_def)
             _set_scale_visibility(child_layer, member_def)
+            _set_layer_transparency(child_layer, member_def)
             node = group_node.addLayer(child_layer)
             if node:
                 node.setItemVisibilityChecked(bool(member_def.get("visibility", True)))
@@ -632,6 +642,7 @@ def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, projec
             child_layer = _convert_raster_layer(in_folder, member_def, out_file, project)
             _set_metadata(child_layer, member_def)
             _set_scale_visibility(child_layer, member_def)
+            _set_layer_transparency(child_layer, member_def)
             node = group_node.addLayer(child_layer)
             if node:
                 node.setItemVisibilityChecked(bool(member_def.get("visibility", True)))
@@ -672,7 +683,8 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             out_layer = _convert_feature_layer(in_folder, layer_def, out_file, project)
             _set_metadata(out_layer, layer_def)
             _set_scale_visibility(out_layer, layer_def)
-            
+            _set_layer_transparency(out_layer, layer_def)
+
             # Get the layer tree node (it should exist now)
             root = QgsProject.instance().layerTreeRoot()
             node = root.findLayer(out_layer.id())
@@ -683,6 +695,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             out_layer = _convert_raster_layer(in_folder, layer_def, out_file, project)
             _set_metadata(out_layer, layer_def)
             _set_scale_visibility(out_layer, layer_def)
+            _set_layer_transparency(out_layer, layer_def)
             _export_qlr_with_visibility(out_layer, layer_def, out_file)
 
         elif layer_type == 'CIMAnnotationLayer':
