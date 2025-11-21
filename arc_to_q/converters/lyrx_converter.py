@@ -175,7 +175,8 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
 
     # Absolute URI
     if factory == "FileGDB":
-        if dataset_type == "esriDTFeatureClass":
+        if dataset_type == "esriDTFeatureClass" or dataset_type == "esriDTTable":
+            # Tables use the same connection string format as Feature Classes
             abs_uri = f"{abs_path.as_posix()}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
             abs_uri = os.path.join(abs_path.as_posix(), dataset)
@@ -188,7 +189,8 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
     out_dir = Path(out_file).parent.resolve()
     rel_path = Path(os.path.relpath(abs_path, start=out_dir))
     if factory == "FileGDB":
-        if dataset_type == "esriDTFeatureClass":
+        if dataset_type == "esriDTFeatureClass" or dataset_type == "esriDTTable":
+            # Tables use the same connection string format as Feature Classes
             rel_uri = f"{rel_path.as_posix()}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
             rel_uri = os.path.join(rel_path.as_posix(), dataset)
