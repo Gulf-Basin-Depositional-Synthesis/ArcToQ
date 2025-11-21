@@ -7,8 +7,11 @@ from qgis.core import QgsRasterDataProvider
 RESAMPLING_MAP = {
     'NearestNeighbor': QgsRasterDataProvider.ResamplingMethod.Nearest,
     'Bilinear': QgsRasterDataProvider.ResamplingMethod.Bilinear,
+    'BilinearInterpolation': QgsRasterDataProvider.ResamplingMethod.Bilinear, 
     'Cubic': QgsRasterDataProvider.ResamplingMethod.Cubic,
-    'Majority': QgsRasterDataProvider.ResamplingMethod.Average,  # No direct equivalent, using Average
+    'CubicConvolution': QgsRasterDataProvider.ResamplingMethod.Cubic,         
+    'Majority': QgsRasterDataProvider.ResamplingMethod.Average, 
+    'MajorityVote': QgsRasterDataProvider.ResamplingMethod.Average            
 }
 
 def get_resampling_method(colorizer_def: dict) -> QgsRasterDataProvider.ResamplingMethod:
