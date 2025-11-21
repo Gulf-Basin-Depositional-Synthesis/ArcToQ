@@ -17,6 +17,7 @@ from qgis.core import (
     QgsReadWriteContext,
     QgsLayerTreeGroup,
     QgsProject,
+    QgsDataSourceUri,
     Qgis
 )
 
@@ -149,23 +150,35 @@ def _parse_xml_dataconnection(xml_string: str) -> dict | None:
     return None
 
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
-    """Helper to build absolute and relative URIs for a dataset.
+    """Helper to build absolute/relative URIs and determine provider type.
     
-    Args:
-        in_folder (str): Path to the folder containing the .lyrx file.
-        conn_str (str): The workspace connection string from the .lyrx file.
-        factory (str): The workspace factory type (e.g. "FileGDB", "Shapefile").
-        dataset (str): The dataset name (e.g. feature class or table name).
-        dataset_type (str): The dataset type (e.g. "esriDTRasterDataset", "esriDTFeatureClass").
-        def_query (str): The definition query string to append to the URI (or empty string).
-            The query should already be in QGIS-compatible format, including the leading "|subset=".
-        out_file (str): Path to the converted QGIS .qlr file.
-
     Returns:
-        tuple: (abs_uri, rel_uri)
-          - abs_uri: Absolute QGIS URI for the dataset
-          - rel_uri: Relative QGIS URI for the dataset
+        tuple: (abs_uri, rel_uri, provider)
     """
+    # --- Handle Web Feature Services ---
+    if factory == "FeatureService":
+        # Strip 'URL=' prefix if present
+        url = conn_str.replace("URL=", "").strip()
+        
+        # Construct the base URL (Service + Layer ID)
+        if url.endswith("/"):
+            base_url = f"{url}{dataset}"
+        else:
+            base_url = f"{url}/{dataset}"
+            
+        # FIX: Create a proper QGIS URI for the 'arcgisfeatureserver' provider.
+        # It expects a string like: "url='https://.../MapServer/1' crs='...'"
+        ds_uri = QgsDataSourceUri()
+        ds_uri.setParam("url", base_url)
+        
+        # If you had a definition query, you might set it here too, but for now
+        # we return the URI string. The provider often handles SQL via 'sql=' param
+        # but standard QGIS subset strings might not apply directly without loading.
+        
+        uri = ds_uri.uri()
+        return uri, uri, "arcgisfeatureserver"
+
+    # --- Handle Local Files ---
     if "=" in conn_str:
         _, raw_path = conn_str.split("=", 1)
     else:
@@ -174,24 +187,33 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
     lyrx_dir = Path(in_folder)
     abs_path = (lyrx_dir / raw_path).resolve()
 
+    provider = "ogr" # Default to OGR for vector files
+
     # Absolute URI
     if factory == "FileGDB":
         if dataset_type == "esriDTFeatureClass" or dataset_type == "esriDTTable":
-            # Tables use the same connection string format as Feature Classes
             abs_uri = f"{abs_path.as_posix()}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
             abs_uri = os.path.join(abs_path.as_posix(), dataset)
+            provider = "gdal"
         else:
             raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
+        # Shapefiles, Rasters, etc.
         abs_uri = os.path.join(abs_path.as_posix(), dataset)
+        if dataset_type == "esriDTRasterDataset":
+            provider = "gdal"
 
     # Relative URI
     out_dir = Path(out_file).parent.resolve()
-    rel_path = Path(os.path.relpath(abs_path, start=out_dir))
+    try:
+        rel_path = Path(os.path.relpath(abs_path, start=out_dir))
+    except ValueError:
+        # If paths are on different drives, relpath fails. Fallback to absolute.
+        rel_path = abs_path
+
     if factory == "FileGDB":
         if dataset_type == "esriDTFeatureClass" or dataset_type == "esriDTTable":
-            # Tables use the same connection string format as Feature Classes
             rel_uri = f"{rel_path.as_posix()}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
             rel_uri = os.path.join(rel_path.as_posix(), dataset)
@@ -211,36 +233,24 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
             abs_uri += def_query
             rel_uri += def_query
 
-    return abs_uri, rel_uri
+    return abs_uri, rel_uri, provider
 
 def _parse_source(in_folder, data_connection, def_query, out_file):
-    """Build both absolute and relative QGIS-friendly URIs for a dataset.
+    """Build URIs and determine provider.
     
-    Handles both direct feature class connections and joined tables.
-    
-    Args:
-        in_folder (str): Path to the folder containing the .lyrx file.
-        data_connection (dict): The data connection info from the .lyrx file.
-        def_query (str): The definition query string to append to the URI (or empty string).
-            The query should already be in QGIS-compatible format, including the leading "|subset=".
-        out_file (str): Path to the converted QGIS .qlr file.
-
     Returns:
-        tuple: (abs_uri, rel_uri, join_info)
-          - abs_uri: Absolute QGIS URI for the base dataset
-          - rel_uri: Relative QGIS URI for the base dataset
-          - join_info: dict describing join (or None if not a join)
+        tuple: ( (abs_uri, rel_uri, provider), join_info )
     """
     factory = data_connection.get("workspaceFactory")
     conn_str = data_connection.get("workspaceConnectionString", "")
     dataset = data_connection.get("dataset")
     dataset_type = data_connection.get("datasetType")
 
-    # --- Handle direct connections (FileGDB, Shapefile, Raster) ---
+    # --- Handle direct connections ---
     if factory and conn_str and dataset:
         return _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file), None
 
-    # --- Handle table join (CIMRelQueryTableDataConnection) ---
+    # --- Handle table join ---
     if data_connection.get("type") == "CIMRelQueryTableDataConnection":
         if def_query:
             raise NotImplementedError("Definition queries on joined layers are not yet supported.")
@@ -248,9 +258,8 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
         source = data_connection.get("sourceTable", {})
         dest = data_connection.get("destinationTable", {})
 
-        # Build URIs for source (feature class) and destination (table)
-        (abs_uri, rel_uri), _ = _parse_source(in_folder, source, "", out_file)
-        (abs_table_uri, rel_table_uri), _ = _parse_source(in_folder, dest, "", out_file)
+        (abs_uri, rel_uri, src_provider), _ = _parse_source(in_folder, source, "", out_file)
+        (abs_table_uri, rel_table_uri, dest_provider), _ = _parse_source(in_folder, dest, "", out_file)
 
         join_info = {
             "primaryKey": data_connection.get("primaryKey"),
@@ -258,10 +267,12 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
             "joinType": data_connection.get("joinType", "esriLeftOuterJoin"),
             "destinationAbs": abs_table_uri,
             "destinationRel": rel_table_uri,
-            "destinationName": dest.get("dataset")
+            "destinationName": dest.get("dataset"),
+            "sourceProvider": src_provider,
+            "destinationProvider": dest_provider
         }
 
-        return (abs_uri, rel_uri), join_info
+        return (abs_uri, rel_uri, src_provider), join_info
 
     raise NotImplementedError(f"Unsupported dataConnection type: {data_connection.get('type')}")
 
@@ -394,17 +405,17 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
     if f_table["type"] != "CIMFeatureTable":
         raise Exception(f"Unexpected feature table type: {f_table['type']}")
 
-    # Parse source: returns (abs_uri, rel_uri), join_info
+    # Parse source: returns (abs_uri, rel_uri, provider), join_info
     def_query = _parse_definition_query(layer_def)
-    (abs_uri, rel_uri), join_info = _parse_source(in_folder, f_table["dataConnection"], def_query, out_file)
+    (abs_uri, rel_uri, provider), join_info = _parse_source(in_folder, f_table["dataConnection"], def_query, out_file)
 
     # Apply join if present
     if join_info:
-        # Data source URIs
         source_uri = abs_uri
         join_uri = join_info["destinationAbs"]
+        src_prov = join_info.get("sourceProvider", "ogr")
+        dst_prov = join_info.get("destinationProvider", "ogr")
 
-        # Build SQL for the virtual layer
         sql = f"""
             SELECT f.*, j.*
             FROM "{layer_def['name']}" AS f
@@ -412,33 +423,30 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
             ON f."{join_info['primaryKey']}" = j."{join_info['foreignKey']}"
         """
 
-        # Create virtual layer definition
         vl_def = QgsVirtualLayerDefinition()
-        vl_def.addSource(layer_def['name'], source_uri, "ogr", "")
-        vl_def.addSource(join_info['destinationName'], join_uri, "ogr", "")
+        vl_def.addSource(layer_def['name'], source_uri, src_prov, "")
+        vl_def.addSource(join_info['destinationName'], join_uri, dst_prov, "")
         vl_def.setQuery(sql)
 
-        # Create virtual layer
         layer = QgsVectorLayer(vl_def.toString(), layer_name, "virtual")
         if not layer.isValid():
             raise RuntimeError(f"Virtual layer failed to create: {layer_name}")
 
     else:
-        # No join, just load the feature layer normally
-        layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
-        if not layer.isValid():
-            raise RuntimeError(f"Layer failed to load: {layer_name} {abs_uri}")
+        # No join: Load layer using the detected provider (ogr, arcgisfeatureserver, etc.)
+        print(f"Loading layer '{layer_name}' with provider '{provider}' at {abs_uri}")
+        layer = QgsVectorLayer(abs_uri, layer_name, provider)
         
-        # Attempt to switch to relative URI for portable QLR files
-        # This is especially important for network drives where path resolution can be problematic
-        test_layer = QgsVectorLayer(rel_uri, f"test_{layer_name}", "ogr")
-        if test_layer.isValid():
-            # Relative path works, switch the main layer to use it
-            layer.setDataSource(rel_uri, layer.name(), layer.providerType())
-            if not layer.isValid():
-                # If switching to relative path breaks the layer, recreate with absolute path
-                layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
-        # If relative path doesn't work, keep using absolute path (no action needed)
+        if not layer.isValid():
+            raise RuntimeError(f"Layer failed to load: {layer_name} {abs_uri} (Provider: {provider})")
+        
+        # Only attempt relative path switch for file-based providers (OGR)
+        if provider == "ogr":
+            test_layer = QgsVectorLayer(rel_uri, f"test_{layer_name}", "ogr")
+            if test_layer.isValid():
+                layer.setDataSource(rel_uri, layer.name(), layer.providerType())
+                if not layer.isValid():
+                    layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
 
     # Set other layer properties
     _set_display_field(layer, layer_def)
@@ -456,7 +464,6 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
     root = project.layerTreeRoot()
     node = root.addLayer(layer)
     
-    # Set visibility if specified
     if 'visibility' in layer_def:
         node.setItemVisibilityChecked(layer_def['visibility'])
     return layer
@@ -472,7 +479,6 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
     if not data_connection:
         raise RuntimeError(f"Raster layer '{layer_name}' is missing the 'dataConnection' definition.")
 
-    # Handle XML vs Dict data connections
     if isinstance(data_connection, str):
         parsed_connection = _parse_xml_dataconnection(data_connection)
         if not parsed_connection:
@@ -494,15 +500,18 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
 
     data_connection = {k[0].lower() + k[1:]: v for k, v in data_connection.items()}
 
-    (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
+    # Unpack the new 3-item tuple (abs, rel, provider), ignoring provider for now as we default to gdal
+    (abs_uri, rel_uri, provider), _ = _parse_source(in_folder, data_connection, "", out_file)
 
-    # Suppress GDAL warnings during load
     gdal_log_file = os.environ.get('CPL_LOG')
     os.environ['CPL_LOG'] = os.devnull
     rlayer = None
 
+    # Use the detected provider if possible, otherwise fallback to gdal
+    raster_provider = provider if provider else "gdal"
+    
     try:
-        rlayer = QgsRasterLayer(abs_uri, layer_name, "gdal")
+        rlayer = QgsRasterLayer(abs_uri, layer_name, raster_provider)
     finally:
         if gdal_log_file:
             os.environ['CPL_LOG'] = gdal_log_file
@@ -517,17 +526,15 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
             error_msg += f"\nFile not found at '{abs_uri}'."
         raise RuntimeError(error_msg)
 
-    # --- ORDER FIX: Switch Path -> Then Symbology ---
-    # We must set the final data source (relative path) BEFORE applying symbology.
-    # setDataSource() resets the rendering pipe, which would wipe out our Provider Resampling settings.
-    try:
-        test_layer = QgsRasterLayer(rel_uri, "test", "gdal")
-        if test_layer.isValid():
-            switch_to_relative_path(rlayer, rel_uri)
-    except Exception as e:
-        print(f"Warning: Could not set relative path for raster layer '{layer_name}'; using absolute path in QLR. Error: {e}")
+    # Switch path (only for file-based gdal layers)
+    if raster_provider == "gdal":
+        try:
+            test_layer = QgsRasterLayer(rel_uri, "test", "gdal")
+            if test_layer.isValid():
+                switch_to_relative_path(rlayer, rel_uri)
+        except Exception as e:
+            print(f"Warning: Could not set relative path for raster layer '{layer_name}'; using absolute path in QLR. Error: {e}")
 
-    # Apply Symbology (Renderer + Resampling) to the finalized layer
     apply_raster_symbology(rlayer, layer_def)
 
     project.addMapLayer(rlayer, False)

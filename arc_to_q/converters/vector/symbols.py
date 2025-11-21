@@ -10,7 +10,7 @@ from qgis.core import QgsMarkerSymbol, QgsLineSymbol, QgsFillSymbol, QgsSymbol
 
 from .marker_layers import (
     create_simple_marker_from_vector, create_font_marker_from_character,
-    create_default_marker_layer
+    create_default_marker_layer, create_picture_marker_from_def
 )
 from .line_layers import create_line_layers_from_def, create_default_line_layer
 from .fill_layers import create_fill_layer_from_def, create_default_fill_layer
@@ -72,6 +72,8 @@ class SymbolFactory:
                 qgis_layer = create_simple_marker_from_vector(layer_def)
             elif layer_type == "CIMCharacterMarker":
                 qgis_layer = create_font_marker_from_character(layer_def)
+            elif layer_type == "CIMPictureMarker":
+                qgis_layer = create_picture_marker_from_def(layer_def)
 
             if qgis_layer:
                 marker_symbol.appendSymbolLayer(qgis_layer)

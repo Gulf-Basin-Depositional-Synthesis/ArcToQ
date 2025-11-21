@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any
 from qgis.core import (
     QgsSimpleMarkerSymbolLayer,
     QgsFontMarkerSymbolLayer,
+    QgsRasterMarkerSymbolLayer,
     QgsUnitTypes,
 )
 from qgis.PyQt.QtCore import Qt, QPointF
@@ -131,6 +132,45 @@ def create_font_marker_from_character(layer_def: Dict[str, Any]) -> Optional[Qgs
         logger.error(f"Failed to create font marker from character: {e}")
         return None
 
+def create_picture_marker_from_def(layer_def: Dict[str, Any]) -> Optional[QgsRasterMarkerSymbolLayer]:
+    """
+    Creates a QGIS Raster (Picture) Marker layer from a CIMPictureMarker definition.
+    """
+    try:
+        url = layer_def.get("url", "")
+        path = ""
+
+        # Handle embedded Base64 images
+        if "base64," in url:
+            # Extract just the base64 string
+            base64_data = url.split("base64,")[1]
+            # QGIS format for embedded raster markers
+            path = f"base64:{base64_data}"
+        else:
+            # Assume standard file path or web URL
+            path = url
+
+        if not path:
+            return None
+
+        layer = QgsRasterMarkerSymbolLayer(path)
+        if not layer:
+            return None
+
+        size = layer_def.get("size", 12.0)
+        layer.setSize(size)
+        layer.setSizeUnit(QgsUnitTypes.RenderPoints)
+        
+        # Handle optional rotation if present in the layer def
+        rotation = layer_def.get("rotation", 0.0)
+        if rotation:
+            layer.setAngle(rotation)
+
+        return layer
+
+    except Exception as e:
+        logger.error(f"Failed to create picture marker: {e}")
+        return None
 
 def _determine_marker_shape(layer_def: Dict[str, Any]):
     """
