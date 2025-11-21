@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 # MANUAL TUNING: Adjust these values for specific character codes
 # Format: character_code: (rotation_adjustment, y_offset_adjustment)
 CHAR_ADJUSTMENTS = {
-    40: (0, -3),     # Thrust fault teeth - try 90° (or try -90 if that doesn't work)
+    40: (0, -3),     # Thrust fault teeth - 
+    35: (0, -2), # Thrust fault triangle (ESRI Default Marker)
     38: (0, -1.7),     # Strike slip - vertical offset to center it
     70: (0, -0.25),     # Anticline F - small vertical adjustment
     77: (0, -0.7),     # Syncline M - small vertical adjustment
