@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # MANUAL TUNING: Adjust these values for specific character codes
 CHAR_ADJUSTMENTS = {
     40: (0, -3),      # Thrust fault teeth (USGS Font)
-    (35, "ESRI Default Marker"): (180, -2.5), # Thrust fault triangle (ESRI Default Marker)
+    (35, "ESRI Default Marker"): (0, -2), # Thrust fault triangle (ESRI Default Marker)
     38: (0, -1.7),    # Strike slip
     70: (0, -0.25),   # Anticline F
     77: (0, -0.7),    # Syncline M
