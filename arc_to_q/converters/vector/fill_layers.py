@@ -56,17 +56,17 @@ def _create_solid_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsSimpleFil
     return None
 
 
-def _create_stroke_as_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsSimpleFillSymbolLayer]:
-    """Creates a simple fill layer used only for its stroke properties."""
-    if stroke_layer := create_solid_stroke_layer(layer_def):
-        simple_stroke = QgsSimpleFillSymbolLayer()
-        simple_stroke.setStrokeColor(stroke_layer.color())
-        simple_stroke.setStrokeWidth(stroke_layer.width())
-        simple_stroke.setStrokeWidthUnit(stroke_layer.widthUnit())
-        simple_stroke.setPenJoinStyle(stroke_layer.penJoinStyle())
-        simple_stroke.setBrushStyle(Qt.NoBrush)
-        return simple_stroke
-    return None
+def _create_stroke_as_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsSymbolLayer]:
+    """
+    Creates an outline for a fill symbol. 
+    
+    NOTE: We return a QgsSimpleLineSymbolLayer (not a FillLayer). 
+    QGIS Fill Symbols accept line layers, which act as the polygon outline.
+    This is required because QgsSimpleFillSymbolLayer does NOT support custom dash vectors.
+    """
+    # create_solid_stroke_layer returns a fully configured QgsSimpleLineSymbolLayer
+    # (including custom dashes, caps, joins, and colors)
+    return create_solid_stroke_layer(layer_def)
 
 
 def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsSimpleFillSymbolLayer:
