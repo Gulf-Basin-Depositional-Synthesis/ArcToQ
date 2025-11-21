@@ -81,10 +81,15 @@ def _make_label_settings(layer: QgsVectorLayer, label_class: dict, layer_def: di
 
     # --- Check for coded value domain ---!!!
     if label_class.get("useCodedValue", False) and not is_expression:
-        domain_expression = domain_to_case_expression(layer, expression)
-        if domain_expression:
-            expression = domain_expression
-            is_expression = True
+        try:
+            # Attempt to resolve domain; if field is missing (e.g. joined or renamed), this may fail.
+            domain_expression = domain_to_case_expression(layer, expression)
+            if domain_expression:
+                expression = domain_expression
+                is_expression = True
+        except Exception as e:
+            print(f"Warning: Failed to resolve coded value domain for label field '{expression}': {e}")
+            # Proceed without domain conversion (keep original expression)
 
     # --- Text Format ---
     text_format = QgsTextFormat()
