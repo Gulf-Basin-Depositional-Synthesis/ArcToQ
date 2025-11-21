@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import io
+import tempfile
 
 from qgis.core import (
     QgsApplication,
@@ -449,27 +450,10 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
         node.setItemVisibilityChecked(layer_def['visibility'])
     return layer
 
+
 def _convert_raster_layer(in_folder, layer_def, out_file, project):
     """
     Creates a QgsRasterLayer from a CIMRasterLayer definition.
-
-    This function is designed to handle various formats for the 'dataConnection'
-    in a .lyrx file. It can be a standard dictionary or a complex XML string,
-    which is common for rasters with functions applied. It parses the connection,
-    builds the source URI, creates the QGIS layer, and applies symbology.
-
-    Args:
-        in_folder (str): The directory of the input .lyrx file.
-        layer_def (dict): The layer definition dictionary from the parsed .lyrx JSON.
-        out_file (str): The path for the output .qlr file.
-        project (QgsProject): The active QgsProject instance.
-
-    Returns:
-        QgsRasterLayer: The created and configured QGIS raster layer.
-
-    Raises:
-        RuntimeError: If the data connection is missing or cannot be parsed, or if the
-                      raster layer fails to load.
     """
     layer_name = layer_def.get("name", "Raster")
     data_connection = layer_def.get("dataConnection")
@@ -477,20 +461,17 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
     if not data_connection:
         raise RuntimeError(f"Raster layer '{layer_name}' is missing the 'dataConnection' definition.")
 
-    # Case 1: The data connection is an XML string that needs parsing.
+    # Handle XML vs Dict data connections
     if isinstance(data_connection, str):
         parsed_connection = _parse_xml_dataconnection(data_connection)
         if not parsed_connection:
             raise RuntimeError(f"Failed to parse XML data connection for raster layer: {layer_name}")
         data_connection = parsed_connection
-
-    # Case 2: The data connection is a dict, but its 'dataset' field contains the XML.
     elif isinstance(data_connection, dict):
         dataset_value = data_connection.get('dataset', '')
         if isinstance(dataset_value, str) and '<' in dataset_value:
             parsed_connection = _parse_xml_dataconnection(dataset_value)
             if parsed_connection:
-                # Use the workspace from the parent dict if the parsed one is incomplete.
                 if 'workspaceConnectionString' in data_connection and parsed_connection.get('workspaceConnectionString') in (None, 'DATABASE='):
                     parsed_connection['workspaceConnectionString'] = data_connection['workspaceConnectionString']
                 data_connection = parsed_connection
@@ -500,22 +481,18 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
     if not isinstance(data_connection, dict):
         raise RuntimeError(f"Unexpected data_connection type: {type(data_connection)} for layer {layer_name}")
 
-    # Normalize keys (e.g., 'WorkspaceConnectionString' -> 'workspaceConnectionString') for consistency.
     data_connection = {k[0].lower() + k[1:]: v for k, v in data_connection.items()}
 
     (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
 
-    # Suppress GDAL warnings
-    # Save the current logging setting and redirect logs to a null device.
+    # Suppress GDAL warnings during load
     gdal_log_file = os.environ.get('CPL_LOG')
     os.environ['CPL_LOG'] = os.devnull
     rlayer = None
 
     try:
-        # Create the raster layer. This is where the warnings are generated.
         rlayer = QgsRasterLayer(abs_uri, layer_name, "gdal")
     finally:
-        # Restore the original GDAL logging setting, whether the layer loaded successfully or not.
         if gdal_log_file:
             os.environ['CPL_LOG'] = gdal_log_file
         else:
@@ -529,16 +506,18 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
             error_msg += f"\nFile not found at '{abs_uri}'."
         raise RuntimeError(error_msg)
 
-    # Prefer a relative path in the saved QLR file for portability.
+    # --- ORDER FIX: Switch Path -> Then Symbology ---
+    # We must set the final data source (relative path) BEFORE applying symbology.
+    # setDataSource() resets the rendering pipe, which would wipe out our Provider Resampling settings.
     try:
         test_layer = QgsRasterLayer(rel_uri, "test", "gdal")
         if test_layer.isValid():
-            rlayer.setDataSource(rel_uri, rlayer.name(), rlayer.providerType())
-    except Exception:
-        print(f"Warning: Could not set relative path for raster layer '{layer_name}'; using absolute path in QLR.")
+            switch_to_relative_path(rlayer, rel_uri)
+    except Exception as e:
+        print(f"Warning: Could not set relative path for raster layer '{layer_name}'; using absolute path in QLR. Error: {e}")
 
+    # Apply Symbology (Renderer + Resampling) to the finalized layer
     apply_raster_symbology(rlayer, layer_def)
-    switch_to_relative_path(rlayer, rel_uri)
 
     project.addMapLayer(rlayer, False)
     return rlayer
@@ -673,7 +652,6 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             _set_metadata(out_layer, layer_def)
             _set_scale_visibility(out_layer, layer_def)
             
-            # Get the layer tree node (it should exist now)
             root = QgsProject.instance().layerTreeRoot()
             node = root.findLayer(out_layer.id())
             if node:
@@ -683,7 +661,15 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             out_layer = _convert_raster_layer(in_folder, layer_def, out_file, project)
             _set_metadata(out_layer, layer_def)
             _set_scale_visibility(out_layer, layer_def)
-            _export_qlr_with_visibility(out_layer, layer_def, out_file)
+            
+            # Explicitly add raster layer to layer tree so it can be found for export
+            root = QgsProject.instance().layerTreeRoot()
+            node = root.addLayer(out_layer)
+            
+            if node:
+                if 'visibility' in layer_def:
+                    node.setItemVisibilityChecked(layer_def['visibility'])
+                nodes_to_export = [node]
 
         elif layer_type == 'CIMAnnotationLayer':
             print("Annotation layers are unsupported")
@@ -691,33 +677,30 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         else:
             raise Exception(f"Unhandled layer type: {layer_type}")
 
-        # Export the QLR including the layer tree node(s)
+        # Export the QLR
         if nodes_to_export:
-            # Create a temporary file for initial export
-            import tempfile
+            # Use tempfile to create a valid file path for export (fixes StringIO error)
             with tempfile.NamedTemporaryFile(mode='w', suffix='.qlr', delete=False, encoding='utf-8') as temp_file:
                 temp_path = temp_file.name
             
             try:
-                # Export to temporary file
                 ok, error_message = QgsLayerDefinition.exportLayerDefinition(temp_path, nodes_to_export)
                 
                 if not ok:
                     raise RuntimeError(f"Failed to export layer definition: {error_message}")
                 
-                # Read the XML content from the temp file
+                # Read the temporary file content
                 with open(temp_path, 'r', encoding='utf-8') as f:
                     qlr_content = f.read()
                 
-                # Post-process for symbol level
+                # Post-process content (e.g. for symbol levels)
                 final_qlr_content = VectorRenderer().post_process_qlr_for_symbol_levels(qlr_content, layer_def)
                 
-                # Write to the actual output file
+                # Write to final output location
                 with open(out_file, 'w', encoding='utf-8') as f:
                     f.write(final_qlr_content)
                 
             finally:
-                # Clean up the temporary file
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
 
@@ -726,7 +709,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         print(f"Error converting LYRX: {e}")
         raise
     finally:
-        project.clear()  # Clear the project instance for the next run
+        project.clear()
         if manage_qgs:
             qgs.exitQgis()
 
