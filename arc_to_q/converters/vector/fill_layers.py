@@ -72,13 +72,25 @@ def _create_stroke_as_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsSimpl
 def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsSimpleFillSymbolLayer:
     """Creates a hatch fill layer by mapping rotation to a QGIS BrushStyle."""
     hatch_fill = QgsSimpleFillSymbolLayer()
-    rotation = layer_def.get("rotation", 0.0)
     
-    style_map = {90: Qt.VerPattern, 0: Qt.HorPattern, 180: Qt.HorPattern,
-                 45: Qt.BDiagPattern, 135: Qt.FDiagPattern}
-    brush_style = style_map.get(rotation, Qt.SolidPattern)
-    if brush_style == Qt.SolidPattern:
-        logger.warning(f"Unsupported CIMHatchFill rotation: {rotation}. Defaulting to solid.")
+    # 1. Get rotation and normalize it to 0-179 range
+    # This handles negative angles (-90 -> 90) and standardizes geometry
+    raw_rotation = layer_def.get("rotation", 0.0)
+    normalized_rotation = int(raw_rotation) % 180
+    
+    # 2. Map normalized angles to Qt Patterns
+    # 0 = Horizontal, 90 = Vertical, 45 = BDiag (///), 135 = FDiag (\\\)
+    style_map = {
+        0: Qt.HorPattern, 
+        90: Qt.VerPattern,
+        45: Qt.BDiagPattern, 
+        135: Qt.FDiagPattern
+    }
+    
+    brush_style = style_map.get(normalized_rotation, Qt.SolidPattern)
+    
+    if brush_style == Qt.SolidPattern and normalized_rotation not in [0, 90, 45, 135]:
+        logger.warning(f"Unsupported CIMHatchFill rotation: {raw_rotation} (Norm: {normalized_rotation}). Defaulting to solid.")
     
     hatch_fill.setBrushStyle(brush_style)
 
