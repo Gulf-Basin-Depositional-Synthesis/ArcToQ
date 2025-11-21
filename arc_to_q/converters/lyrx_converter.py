@@ -19,6 +19,7 @@ from qgis.core import (
     QgsProject,
     QgsDataSourceUri,
     QgsVectorLayerTemporalProperties,
+    QgsVectorLayerJoinInfo,
     Qgis
 )
 
@@ -431,7 +432,6 @@ def _set_field_aliases_and_visibility(layer: QgsVectorLayer, layer_def: dict):
     table_config.setColumns(new_columns)
     layer.setAttributeTableConfig(table_config)
 
-
 def _convert_feature_layer(in_folder, layer_def, out_file, project):
     layer_name = layer_def['name']
     f_table = layer_def["featureTable"]
@@ -442,44 +442,52 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
     def_query = _parse_definition_query(layer_def)
     (abs_uri, rel_uri, provider), join_info = _parse_source(in_folder, f_table["dataConnection"], def_query, out_file)
 
-    # Apply join if present
+    # 1. Always load the primary layer directly first
+    #print(f"Loading layer '{layer_name}' with provider '{provider}' at {abs_uri}")
+    layer = QgsVectorLayer(abs_uri, layer_name, provider)
+
+    if not layer.isValid():
+        raise RuntimeError(f"Layer failed to load: {layer_name} {abs_uri} (Provider: {provider})")
+
+    # Relative path fallback (for OGR)
+    if provider == "ogr":
+        test_layer = QgsVectorLayer(rel_uri, f"test_{layer_name}", "ogr")
+        if test_layer.isValid():
+            layer.setDataSource(rel_uri, layer.name(), layer.providerType())
+            if not layer.isValid():
+                layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
+
+    # Add main layer to project (Registry only, not Legend/Tree yet)
+    project.addMapLayer(layer, False)
+
+    # 2. Apply join if present
+    join_layer = None
     if join_info:
-        source_uri = abs_uri
-        join_uri = join_info["destinationAbs"]
-        src_prov = join_info.get("sourceProvider", "ogr")
-        dst_prov = join_info.get("destinationProvider", "ogr")
+        #print(f"  Applying native join to '{join_info['destinationName']}'...")
 
-        sql = f"""
-            SELECT f.*, j.*
-            FROM "{layer_def['name']}" AS f
-            LEFT JOIN "{join_info['destinationName']}" AS j
-            ON f."{join_info['primaryKey']}" = j."{join_info['foreignKey']}"
-        """
+        join_table_uri = join_info["destinationAbs"]
+        join_table_name = join_info['destinationName']
+        join_provider = join_info.get("destinationProvider", "ogr")
 
-        vl_def = QgsVirtualLayerDefinition()
-        vl_def.addSource(layer_def['name'], source_uri, src_prov, "")
-        vl_def.addSource(join_info['destinationName'], join_uri, dst_prov, "")
-        vl_def.setQuery(sql)
+        join_layer = QgsVectorLayer(join_table_uri, join_table_name, join_provider)
 
-        layer = QgsVectorLayer(vl_def.toString(), layer_name, "virtual")
-        if not layer.isValid():
-            raise RuntimeError(f"Virtual layer failed to create: {layer_name}")
+        if join_layer.isValid():
+            # Add join layer to project (Registry only)
+            project.addMapLayer(join_layer, False)
 
-    else:
-        # No join: Load layer using the detected provider (ogr, arcgisfeatureserver, etc.)
-        print(f"Loading layer '{layer_name}' with provider '{provider}' at {abs_uri}")
-        layer = QgsVectorLayer(abs_uri, layer_name, provider)
-        
-        if not layer.isValid():
-            raise RuntimeError(f"Layer failed to load: {layer_name} {abs_uri} (Provider: {provider})")
-        
-        # Only attempt relative path switch for file-based providers (OGR)
-        if provider == "ogr":
-            test_layer = QgsVectorLayer(rel_uri, f"test_{layer_name}", "ogr")
-            if test_layer.isValid():
-                layer.setDataSource(rel_uri, layer.name(), layer.providerType())
-                if not layer.isValid():
-                    layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
+            # Create and apply the join
+            qgs_join = QgsVectorLayerJoinInfo()
+            qgs_join.setJoinLayer(join_layer)
+            qgs_join.setJoinFieldName(join_info['foreignKey'])
+            qgs_join.setTargetFieldName(join_info['primaryKey'])
+            qgs_join.setUsingMemoryCache(True)
+            qgs_join.setPrefix('') 
+            qgs_join.setJoinLayerId(join_layer.id()) # Critical for persistence
+
+            layer.addJoin(qgs_join)
+            layer.updateFields() # Critical for Identify tool
+        else:
+            print(f"  WARNING: Failed to load join table: {join_table_uri}")
 
     # Set other layer properties
     _set_display_field(layer, layer_def)
@@ -493,14 +501,8 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
     if not layer.isValid():
         raise RuntimeError(f"Layer became invalid after setting properties: {layer_name}")
 
-    project.addMapLayer(layer, False)
-
-    root = project.layerTreeRoot()
-    node = root.addLayer(layer)
-    
-    if 'visibility' in layer_def:
-        node.setItemVisibilityChecked(layer_def['visibility'])
-    return layer
+    # Return both layers so the caller can add them to the layer tree/QLR
+    return layer, join_layer
 
 
 def _convert_raster_layer(in_folder, layer_def, out_file, project):
@@ -640,7 +642,7 @@ def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, projec
     group_node.setItemVisibilityChecked(bool(group_layer_def.get("visibility", True)))
     group_node.setExpanded(bool(group_layer_def.get("expanded", False)))
 
-    # Process child layers using the correct key: "layers"
+    # Process child layers
     for member_uri in group_layer_def.get("layers", []):
         member_def = next((ld for ld in lyrx_json.get("layerDefinitions", []) if ld.get("uRI") == member_uri), None)
         if not member_def:
@@ -650,15 +652,25 @@ def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, projec
         if layer_type == "CIMGroupLayer":
             child_group = _convert_group_layer(in_folder, member_def, lyrx_json, out_file, project)
             group_node.addChildNode(child_group)
+
         elif layer_type == "CIMFeatureLayer":
-            child_layer = _convert_feature_layer(in_folder, member_def, out_file, project)
+            child_layer, child_join_layer = _convert_feature_layer(in_folder, member_def, out_file, project)
+            
             _set_metadata(child_layer, member_def)
             _set_scale_visibility(child_layer, member_def)
             _set_layer_transparency(child_layer, member_def)
+            
+            # Add main layer to group
             node = group_node.addLayer(child_layer)
             if node:
                 node.setItemVisibilityChecked(bool(member_def.get("visibility", True)))
                 node.setExpanded(bool(member_def.get("expanded", False)))
+            
+            # Add join layer to group (hidden) so it exports to QLR
+            if child_join_layer:
+                join_node = group_node.addLayer(child_join_layer)
+                join_node.setItemVisibilityChecked(False)
+                join_node.setExpanded(False)
 
         elif layer_type == 'CIMRasterLayer':
             child_layer = _convert_raster_layer(in_folder, member_def, out_file, project)
@@ -701,16 +713,26 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         if layer_type == "CIMGroupLayer":
             root_node = _convert_group_layer(in_folder, layer_def, lyrx, out_file, project)
             nodes_to_export = [root_node]
+
         elif layer_type == "CIMFeatureLayer":
-            out_layer = _convert_feature_layer(in_folder, layer_def, out_file, project)
+            out_layer, join_layer = _convert_feature_layer(in_folder, layer_def, out_file, project)
             _set_metadata(out_layer, layer_def)
             _set_scale_visibility(out_layer, layer_def)
             _set_layer_transparency(out_layer, layer_def)
 
+            # Add to root tree manually (since we removed it from _convert_feature_layer)
             root = QgsProject.instance().layerTreeRoot()
-            node = root.findLayer(out_layer.id())
+            node = root.addLayer(out_layer)
             if node:
-                nodes_to_export = [node]
+                if 'visibility' in layer_def:
+                    node.setItemVisibilityChecked(layer_def['visibility'])
+                nodes_to_export.append(node)
+            
+            # Add join layer to root tree (hidden) so it exports
+            if join_layer:
+                join_node = root.addLayer(join_layer)
+                join_node.setItemVisibilityChecked(False)
+                nodes_to_export.append(join_node)
                                 
         elif layer_type == 'CIMRasterLayer':
             out_layer = _convert_raster_layer(in_folder, layer_def, out_file, project)
@@ -718,7 +740,6 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             _set_scale_visibility(out_layer, layer_def)
             _set_layer_transparency(out_layer, layer_def)
             
-            # Explicitly add raster layer to layer tree so it can be found for export
             root = QgsProject.instance().layerTreeRoot()
             node = root.addLayer(out_layer)
             
@@ -735,7 +756,6 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
 
         # Export the QLR
         if nodes_to_export:
-            # Use tempfile to create a valid file path for export (fixes StringIO error)
             with tempfile.NamedTemporaryFile(mode='w', suffix='.qlr', delete=False, encoding='utf-8') as temp_file:
                 temp_path = temp_file.name
             
@@ -745,14 +765,11 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
                 if not ok:
                     raise RuntimeError(f"Failed to export layer definition: {error_message}")
                 
-                # Read the temporary file content
                 with open(temp_path, 'r', encoding='utf-8') as f:
                     qlr_content = f.read()
                 
-                # Post-process content (e.g. for symbol levels)
                 final_qlr_content = VectorRenderer().post_process_qlr_for_symbol_levels(qlr_content, layer_def)
                 
-                # Write to final output location
                 with open(out_file, 'w', encoding='utf-8') as f:
                     f.write(final_qlr_content)
                 
