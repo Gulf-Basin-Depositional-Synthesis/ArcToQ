@@ -1,6 +1,3 @@
-"""
-Creates QGIS marker symbol layers from ArcGIS CIM definitions.
-"""
 import logging
 from typing import Optional, Dict, Any
 
@@ -38,7 +35,7 @@ def create_simple_marker_from_vector(layer_def: Dict[str, Any]) -> Optional[QgsS
         marker_layer = QgsSimpleMarkerSymbolLayer()
 
         size = layer_def.get("size", 6.0)
-        shape = _determine_marker_shape(layer_def)
+        shape, is_horizontal_path = _determine_marker_shape(layer_def)
         rotation = layer_def.get("rotation", 0.0)
         
         # Check if this is a line-based marker (like escarpment ticks)
@@ -46,22 +43,16 @@ def create_simple_marker_from_vector(layer_def: Dict[str, Any]) -> Optional[QgsS
         geometry = graphic.get("geometry", {})
         is_line_marker = "paths" in geometry
         
-        #print(f"Vector marker: shape={shape}, size={size}, rotation={rotation}, is_line={is_line_marker}")
-        
-        # For line markers with angleToLine, rotation needs adjustment ??
-        marker_placement = layer_def.get("markerPlacement", {})
-        angle_to_line = marker_placement.get("angleToLine", False)
-        
-        if is_line_marker and angle_to_line:
-            rotation = 0
-        
+        # Fix rotation for line markers
+        # If we mapped a Horizontal path (ArcGIS) to a Vertical Line Shape (QGIS), we need +90 deg
+        if is_horizontal_path and shape == QgsSimpleMarkerSymbolLayer.Line:
+             rotation += 90
+
         marker_layer.setSize(size)
         marker_layer.setSizeUnit(QgsUnitTypes.RenderPoints)
         marker_layer.setShape(shape)
         marker_layer.setAngle(rotation)
         
-        #print(f"Set marker: shape={shape}, size={size}, angle={rotation}°")
-
         graphic_symbol_layers = graphic.get("symbol", {}).get("symbolLayers", [])
         fill_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidFill"), None)
         stroke_def = next((sl for sl in graphic_symbol_layers if sl.get("type") == "CIMSolidStroke"), None)
@@ -74,17 +65,20 @@ def create_simple_marker_from_vector(layer_def: Dict[str, Any]) -> Optional[QgsS
 
         has_stroke = False
         if stroke_def and (stroke_color := parse_color(stroke_def.get("color"))) and (stroke_width := stroke_def.get("width", 0.26)) > 0:
+            # FIXED: For Line and Cross shapes, we MUST use stroke properties (setStrokeStyle)
+            # and MUST NOT disable the pen (Qt.NoPen), otherwise they are invisible.
             if shape in (QgsSimpleMarkerSymbolLayer.Line, QgsSimpleMarkerSymbolLayer.Cross):
-                marker_layer.setColor(stroke_color)
-                marker_layer.setStrokeStyle(Qt.NoPen)  # No outline
-                #print(f"Line/Cross shape: using stroke color {stroke_color.name()} as fill")
-                has_fill = True
+                marker_layer.setColor(stroke_color) # Set fill color match just in case
+                marker_layer.setStrokeColor(stroke_color)
+                marker_layer.setStrokeWidth(stroke_width)
+                marker_layer.setStrokeWidthUnit(QgsUnitTypes.RenderPoints)
+                marker_layer.setStrokeStyle(Qt.SolidLine)
+                has_fill = True # Considered 'filled' because it's visible
             else:
                 marker_layer.setStrokeStyle(Qt.SolidLine)
                 marker_layer.setStrokeColor(stroke_color)
                 marker_layer.setStrokeWidth(stroke_width)
                 marker_layer.setStrokeWidthUnit(QgsUnitTypes.RenderPoints)
-                #print(f"Normal shape stroke: color={stroke_color.name()}, width={stroke_width}")
             has_stroke = True
         
         if not has_fill and not has_stroke:
@@ -93,9 +87,10 @@ def create_simple_marker_from_vector(layer_def: Dict[str, Any]) -> Optional[QgsS
             marker_layer.setStrokeColor(QColor("black"))
             marker_layer.setStrokeWidth(0.2)
             marker_layer.setStrokeStyle(Qt.SolidLine)
-            #print(f"Applied fallback colors")
         elif not has_fill:
-            marker_layer.setColor(QColor(0, 0, 0, 0)) # transparent fill
+            # Only set transparent fill if it's not a Line/Cross (which don't have fill)
+            if shape not in (QgsSimpleMarkerSymbolLayer.Line, QgsSimpleMarkerSymbolLayer.Cross):
+                marker_layer.setColor(QColor(0, 0, 0, 0))
         elif not has_stroke:
             marker_layer.setStrokeStyle(Qt.NoPen)
 
@@ -137,14 +132,17 @@ def create_font_marker_from_character(layer_def: Dict[str, Any]) -> Optional[Qgs
         return None
 
 
-def _determine_marker_shape(layer_def: Dict[str, Any]) -> QgsSimpleMarkerSymbolLayer.Shape:
-    """Determine the QGIS marker shape from ArcGIS marker definition."""
+def _determine_marker_shape(layer_def: Dict[str, Any]):
+    """
+    Determine the QGIS marker shape from ArcGIS marker definition.
+    Returns: (Shape, is_horizontal_path_flag)
+    """
     if not (marker_graphics := layer_def.get("markerGraphics", [])):
-        return QgsSimpleMarkerSymbolLayer.Circle
+        return QgsSimpleMarkerSymbolLayer.Circle, False
 
     graphic = marker_graphics[0]
     if (shape_name := graphic.get("primitiveName")) and shape_name in MARKER_SHAPE_MAP:
-        return MARKER_SHAPE_MAP[shape_name]
+        return MARKER_SHAPE_MAP[shape_name], False
 
     geometry = graphic.get("geometry", {})
     
@@ -155,14 +153,16 @@ def _determine_marker_shape(layer_def: Dict[str, Any]) -> QgsSimpleMarkerSymbolL
             # Check if it's a simple horizontal or vertical line
             if len(path) == 2:
                 p1, p2 = path[0], path[1]
-                # If it's horizontal or vertical, it should work as a line marker
                 is_horizontal = p1[1] == p2[1]
                 is_vertical = p1[0] == p2[0]
-                if is_horizontal or is_vertical:
-                    #print(f"Detected simple line marker - using Cross shape as workaround")
-                    return QgsSimpleMarkerSymbolLayer.Cross  # Use Cross, we'll rotate it
-        #print(f"Detected line marker (paths geometry) - using Line shape")
-        return QgsSimpleMarkerSymbolLayer.Line
+                
+                if is_horizontal:
+                    # Use Line shape, but flag it as horizontal so we can rotate it +90
+                    return QgsSimpleMarkerSymbolLayer.Line, True
+                if is_vertical:
+                    return QgsSimpleMarkerSymbolLayer.Line, False
+
+        return QgsSimpleMarkerSymbolLayer.Line, False
     
     if "rings" in geometry:
         points = geometry["rings"][0]
@@ -170,14 +170,15 @@ def _determine_marker_shape(layer_def: Dict[str, Any]) -> QgsSimpleMarkerSymbolL
         if point_count == 5:
             unique_x = {p[0] for p in points}
             unique_y = {p[1] for p in points}
-            return QgsSimpleMarkerSymbolLayer.Diamond if len(unique_x) == 3 and len(unique_y) == 3 else QgsSimpleMarkerSymbolLayer.Square
+            return (QgsSimpleMarkerSymbolLayer.Diamond if len(unique_x) == 3 and len(unique_y) == 3 else QgsSimpleMarkerSymbolLayer.Square), False
         shape_map = {4: QgsSimpleMarkerSymbolLayer.Triangle, 6: QgsSimpleMarkerSymbolLayer.Pentagon, 7: QgsSimpleMarkerSymbolLayer.Hexagon, 11: QgsSimpleMarkerSymbolLayer.Star, 13: QgsSimpleMarkerSymbolLayer.Cross}
-        return shape_map.get(point_count, QgsSimpleMarkerSymbolLayer.Circle)
+        return shape_map.get(point_count, QgsSimpleMarkerSymbolLayer.Circle), False
+        
     elif "curveRings" in geometry:
         curve_points = [p for p in geometry["curveRings"][0] if isinstance(p, list)]
-        return QgsSimpleMarkerSymbolLayer.Cross2 if len(curve_points) == 13 else QgsSimpleMarkerSymbolLayer.Circle
+        return (QgsSimpleMarkerSymbolLayer.Cross2 if len(curve_points) == 13 else QgsSimpleMarkerSymbolLayer.Circle), False
 
-    return QgsSimpleMarkerSymbolLayer.Circle
+    return QgsSimpleMarkerSymbolLayer.Circle, False
 
 
 def create_default_marker_layer() -> QgsSimpleMarkerSymbolLayer:
