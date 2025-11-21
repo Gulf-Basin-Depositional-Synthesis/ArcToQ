@@ -18,6 +18,7 @@ from qgis.core import (
     QgsLayerTreeGroup,
     QgsProject,
     QgsDataSourceUri,
+    QgsVectorLayerTemporalProperties,
     Qgis
 )
 
@@ -305,6 +306,38 @@ def _set_scale_visibility(layer: QgsMapLayer, layer_def: dict):
     layer.setMinimumScale(min_scale)
     layer.setMaximumScale(max_scale)
 
+def _set_temporal_properties(layer: QgsVectorLayer, layer_def: dict):
+    """
+    Configures the temporal properties of a layer based on ArcGIS time definitions.
+    This enables the use of the QGIS Temporal Controller.
+    """
+    feature_table = layer_def.get("featureTable", {})
+    time_fields = feature_table.get("timeFields", {})
+    
+    if not time_fields:
+        return
+
+    # Parse fields from JSON
+    start_field = time_fields.get("startTimeField")
+    end_field = time_fields.get("endTimeField")
+
+    if start_field:
+        tprops = layer.temporalProperties()
+        
+        # Enable temporal support for this layer
+        tprops.setIsActive(True)
+        
+        if end_field:
+            # Mode: Start and End fields
+            tprops.setMode(Qgis.VectorTemporalMode.FeatureDateTimeStartAndEndFromFields)
+            tprops.setEndField(end_field)
+        else:
+            # Mode: Single field (Instant)
+            tprops.setMode(Qgis.VectorTemporalMode.FeatureDateTimeInstantFromField)
+            
+        tprops.setStartField(start_field)
+        print(f"Enabled temporal properties for '{layer.name()}'. Start: {start_field}, End: {end_field}")
+
 
 def _set_metadata(layer: QgsVectorLayer, layer_def: dict):
     """
@@ -455,6 +488,7 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
     layer.setRenderer(qgis_renderer)
     _set_field_aliases_and_visibility(layer, layer_def)
     set_labels(layer, layer_def)
+    _set_temporal_properties(layer, layer_def)
 
     if not layer.isValid():
         raise RuntimeError(f"Layer became invalid after setting properties: {layer_name}")
