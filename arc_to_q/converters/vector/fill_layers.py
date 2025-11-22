@@ -4,6 +4,7 @@ Handles solid, hatch, picture, and other fill types.
 """
 import logging
 import base64
+import math
 import tempfile
 import os
 import hashlib
@@ -12,12 +13,13 @@ from typing import Optional, Dict, Any
 
 from qgis.core import (
     QgsMarkerSymbol, QgsPointPatternFillSymbolLayer, QgsSimpleFillSymbolLayer,
-    QgsRasterFillSymbolLayer, QgsSymbolLayer, QgsUnitTypes
+    QgsRasterFillSymbolLayer, QgsSymbolLayer, QgsUnitTypes, 
+    QgsGradientFillSymbolLayer, QgsGradientStop, QgsGradientColorRamp
 )
-from qgis.PyQt.QtCore import Qt, QByteArray, QBuffer, QIODevice
+from qgis.PyQt.QtCore import Qt, QByteArray, QBuffer, QIODevice, QPointF
 from qgis.PyQt.QtGui import QColor, QImage
 
-from arc_to_q.converters.utils import parse_color
+from arc_to_q.converters.utils import parse_color, extract_colors_from_ramp
 from .line_layers import create_solid_stroke_layer
 from .marker_layers import create_font_marker_from_character
 
@@ -37,6 +39,8 @@ def create_fill_layer_from_def(layer_def: Dict[str, Any]) -> Optional[QgsSymbolL
         return _create_stroke_as_fill_layer(layer_def)
     elif layer_type == "CIMHatchFill":
         return _create_hatch_fill_layer(layer_def)
+    elif layer_type == "CIMGradientFill":        
+        return _create_gradient_fill_layer(layer_def)
     elif layer_type == "CIMPictureFill":
         return _create_picture_fill_layer(layer_def)
     elif layer_type == "CIMCharacterMarker":
@@ -100,6 +104,99 @@ def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsSimpleFillSymbolLa
 
     hatch_fill.setStrokeStyle(Qt.NoPen)
     return hatch_fill
+
+def _create_gradient_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsGradientFillSymbolLayer]:
+    """
+    Creates a QGIS Gradient Fill layer from a CIMGradientFill definition.
+    """
+    try:
+        gradient_layer = QgsGradientFillSymbolLayer()
+        
+        # Set Coordinate Mode to 'Feature' so it stretches across the polygon
+        gradient_layer.setCoordinateMode(QgsGradientFillSymbolLayer.Feature)
+        gradient_layer.setGradientSpread(QgsGradientFillSymbolLayer.Pad)
+        
+        # 1. Map Gradient Method
+        method = layer_def.get("gradientMethod", "Linear")
+        
+        if method == "Linear":
+            gradient_layer.setGradientType(QgsGradientFillSymbolLayer.Linear)
+            
+            # Initialize standard Left-to-Right vector (0 degrees)
+            gradient_layer.setReferencePoint1(QPointF(0, 0))
+            gradient_layer.setReferencePoint2(QPointF(1, 0))
+            gradient_layer.setReferencePoint1IsCentroid(False)
+            gradient_layer.setReferencePoint2IsCentroid(False)
+            
+            # Add 180 degrees to flip the direction
+            # ArcGIS and QGIS often disagree on whether the angle points 
+            # to the "Start" or the "End" of the gradient.
+            raw_angle = layer_def.get("angle", 0.0)
+            corrected_angle = (raw_angle + 180) % 360
+            gradient_layer.setAngle(corrected_angle)
+
+        elif method in ["Circular", "Radial", "Rectangular", "Buffered"]:
+            gradient_layer.setGradientType(QgsGradientFillSymbolLayer.Radial)
+            gradient_layer.setReferencePoint1(QPointF(0.5, 0.5))
+            gradient_layer.setReferencePoint1IsCentroid(True)
+            gradient_layer.setReferencePoint2(QPointF(1, 0.5))
+            gradient_layer.setReferencePoint2IsCentroid(False)
+            # Radial gradients usually don't need the 180 flip, but if they appear inverted
+            # (inside-out), you might need to swap setColor and setColor2 below.
+        
+        # 2. Handle Colors 
+        color_ramp_def = layer_def.get("colorRamp", {})
+        colors = extract_colors_from_ramp(color_ramp_def)
+        
+        if not colors:
+            colors = [QColor("grey"), QColor("white")]
+
+        if method in ["Circular", "Radial", "Rectangular", "Buffered"]:
+            colors.reverse()
+            
+        if len(colors) == 1:
+            colors.append(colors[0])
+
+        c1 = colors[0]
+        c2 = colors[-1]
+
+        # Create a Ramp Object (This is how 3.4 handles multi-stops)
+        ramp = QgsGradientColorRamp(c1, c2)
+        stops = []
+
+        # --- GAMMA CORRECTION (Manual Midpoint) ---
+        if len(colors) == 2:
+            # RMS average for Linear-like blending (Fixes the "Too Blue" issue)
+            r_mid = int(math.sqrt((c1.red()**2 + c2.red()**2)/2))
+            g_mid = int(math.sqrt((c1.green()**2 + c2.green()**2)/2))
+            b_mid = int(math.sqrt((c1.blue()**2 + c2.blue()**2)/2))
+            a_mid = int((c1.alpha() + c2.alpha())/2)
+            
+            mid_color = QColor(r_mid, g_mid, b_mid, a_mid)
+            stops.append(QgsGradientStop(0.5, mid_color))
+
+        # --- Explicit Stops from JSON ---
+        elif len(colors) > 2:
+            num_intervals = len(colors) - 1
+            for i, color in enumerate(colors):
+                if i == 0 or i == len(colors) - 1:
+                    continue
+                offset = i / num_intervals
+                stops.append(QgsGradientStop(offset, color))
+        
+        # Apply stops to the RAMP, not the layer
+        if stops:
+            ramp.setStops(stops)
+
+        # Tell the layer to use the ColorRamp engine
+        gradient_layer.setGradientColorType(QgsGradientFillSymbolLayer.ColorRamp)
+        gradient_layer.setColorRamp(ramp)
+
+        return gradient_layer
+
+    except Exception as e:
+        logger.error(f"Failed to create gradient fill layer: {e}")
+        return None
 
 
 def _create_point_pattern_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsPointPatternFillSymbolLayer]:
