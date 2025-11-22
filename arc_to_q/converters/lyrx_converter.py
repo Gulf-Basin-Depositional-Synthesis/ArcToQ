@@ -5,16 +5,21 @@ import os
 from pathlib import Path
 import re
 import io
+import tempfile
 
 from qgis.core import (
     QgsApplication,
     QgsVectorLayer,
     QgsRasterLayer,
+    QgsMapLayer,
     QgsVirtualLayerDefinition,
     QgsLayerDefinition,
     QgsReadWriteContext,
     QgsLayerTreeGroup,
     QgsProject,
+    QgsDataSourceUri,
+    QgsVectorLayerTemporalProperties,
+    QgsVectorLayerJoinInfo,
     Qgis
 )
 
@@ -147,47 +152,82 @@ def _parse_xml_dataconnection(xml_string: str) -> dict | None:
     return None
 
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
+    """Helper to build absolute/relative URIs and determine provider type.
+    
+    Args:
+        in_folder (str): Path to the folder containing the .lyrx file.
+        conn_str (str): The workspace connection string from the .lyrx file.
+        factory (str): The workspace factory type (e.g. "FileGDB", "Shapefile").
+        dataset (str): The dataset name (e.g. feature class or table name).
+        dataset_type (str): The dataset type (e.g. "esriDTRasterDataset", "esriDTFeatureClass").
+        def_query (str): The definition query string to append to the URI (or empty string).
+            The query should already be in QGIS-compatible format, including the leading "|subset=".
+        out_file (str): Path to the converted QGIS .qlr file.
+    Returns:
+        tuple: (abs_uri, rel_uri)
+          - abs_uri: Absolute QGIS URI for the dataset
+          - rel_uri: Relative QGIS URI for the dataset
+        tuple: (abs_uri, rel_uri, provider)
+    """
+    # --- Handle Web Feature Services ---
+    if factory == "FeatureService":
+        # Strip 'URL=' prefix if present
+        url = conn_str.replace("URL=", "").strip()
+        
+        # Construct the base URL (Service + Layer ID)
+        if url.endswith("/"):
+            base_url = f"{url}{dataset}"
+        else:
+            base_url = f"{url}/{dataset}"
+            
+        # Create a proper QGIS URI for the 'arcgisfeatureserver' provider.
+        # It expects a string like: "url='https://.../MapServer/1' crs='...'"
+        ds_uri = QgsDataSourceUri()
+        ds_uri.setParam("url", base_url)
+        
+        # If you had a definition query, you might set it here too, but for now
+        # we return the URI string. The provider often handles SQL via 'sql=' param
+        # but standard QGIS subset strings might not apply directly without loading.
+        
+        uri = ds_uri.uri()
+        return uri, uri, "arcgisfeatureserver"
+
+    # --- Handle Local Files ---
     if "=" in conn_str:
         _, raw_path = conn_str.split("=", 1)
     else:
         raw_path = conn_str
 
     lyrx_dir = Path(in_folder)
-    
-    # Build absolute path
-    abs_path = (lyrx_dir / raw_path).absolute()
-    abs_path = Path(os.path.normpath(str(abs_path)))  # <-- ADD THIS LINE
-    
-    # If the path starts with a UNC path on Windows, try to get it back to a drive letter
-    if os.name == 'nt' and str(abs_path).startswith('\\\\'):
-        if len(in_folder) > 1 and in_folder[1] == ':':
-            drive = in_folder[0:2]
-            abs_path = Path(drive) / raw_path
-            abs_path = abs_path.absolute()
-            abs_path = Path(os.path.normpath(str(abs_path)))  # <-- ADD THIS LINE
+    abs_path = (lyrx_dir / raw_path).resolve()
 
-    # Absolute URI - use forward slashes consistently
+    provider = "ogr" # Default to OGR for vector files
+
+    # Absolute URI
     if factory == "FileGDB":
-        if dataset_type == "esriDTFeatureClass":
+        if dataset_type == "esriDTFeatureClass" or dataset_type == "esriDTTable":
             abs_uri = f"{abs_path.as_posix()}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
-            abs_uri = f"{abs_path.as_posix()}/{dataset}"
+            abs_uri = os.path.join(abs_path.as_posix(), dataset)
+            provider = "gdal"
         else:
             raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
-        abs_uri = f"{abs_path.as_posix()}/{dataset}"
+        # Shapefiles, Rasters, etc.
+        abs_uri = os.path.join(abs_path.as_posix(), dataset)
+        if dataset_type == "esriDTRasterDataset":
+            provider = "gdal"
 
     # Relative URI
-    out_dir = Path(out_file).parent.absolute()
-    out_dir = Path(os.path.normpath(str(out_dir)))  # <-- ADD THIS LINE
-    
+    out_dir = Path(out_file).parent.resolve()
     try:
         rel_path = Path(os.path.relpath(abs_path, start=out_dir))
     except ValueError:
+        # If paths are on different drives, relpath fails. Fallback to absolute.
         rel_path = abs_path
-    
+
     if factory == "FileGDB":
-        if dataset_type == "esriDTFeatureClass":
+        if dataset_type == "esriDTFeatureClass" or dataset_type == "esriDTTable":
             rel_uri = f"{rel_path.as_posix()}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
             rel_uri = f"{rel_path.as_posix()}/{dataset}"
@@ -207,8 +247,7 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
             abs_uri += def_query
             rel_uri += def_query
 
-    return abs_uri, rel_uri
-
+    return abs_uri, rel_uri, provider
 
 def _parse_source(in_folder, data_connection, def_query, out_file):
     """Build both absolute and relative QGIS-friendly URIs for a dataset.
@@ -221,12 +260,12 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
         def_query (str): The definition query string to append to the URI (or empty string).
             The query should already be in QGIS-compatible format, including the leading "|subset=".
         out_file (str): Path to the converted QGIS .qlr file.
-
     Returns:
         tuple: (abs_uri, rel_uri, join_info)
           - abs_uri: Absolute QGIS URI for the base dataset
           - rel_uri: Relative QGIS URI for the base dataset
           - join_info: dict describing join (or None if not a join)
+        tuple: ( (abs_uri, rel_uri, provider), join_info )
     """
     factory = data_connection.get("workspaceFactory")
     conn_str = data_connection.get("workspaceConnectionString", "")
@@ -245,9 +284,8 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
         source = data_connection.get("sourceTable", {})
         dest = data_connection.get("destinationTable", {})
 
-        # Build URIs for source (feature class) and destination (table)
-        (abs_uri, rel_uri), _ = _parse_source(in_folder, source, "", out_file)
-        (abs_table_uri, rel_table_uri), _ = _parse_source(in_folder, dest, "", out_file)
+        (abs_uri, rel_uri, src_provider), _ = _parse_source(in_folder, source, "", out_file)
+        (abs_table_uri, rel_table_uri, dest_provider), _ = _parse_source(in_folder, dest, "", out_file)
 
         join_info = {
             "primaryKey": data_connection.get("primaryKey"),
@@ -255,14 +293,24 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
             "joinType": data_connection.get("joinType", "esriLeftOuterJoin"),
             "destinationAbs": abs_table_uri,
             "destinationRel": rel_table_uri,
-            "destinationName": dest.get("dataset")
+            "destinationName": dest.get("dataset"),
+            "sourceProvider": src_provider,
+            "destinationProvider": dest_provider
         }
 
-        return (abs_uri, rel_uri), join_info
+        return (abs_uri, rel_uri, src_provider), join_info
 
     raise NotImplementedError(f"Unsupported dataConnection type: {data_connection.get('type')}")
 
-def _set_scale_visibility(layer: QgsVectorLayer, layer_def: dict):
+
+def _set_layer_transparency(layer: QgsMapLayer, layer_def: dict):
+    """Set the transparency for a QGIS layer based on the ArcGIS layer definition."""
+    transparency = layer_def.get("transparency", 0)
+    if transparency:
+        layer.setOpacity(1 - (transparency / 100.0))
+
+
+def _set_scale_visibility(layer: QgsMapLayer, layer_def: dict):
     """Set the scale visibility for a QGIS layer based on the ArcGIS layer definition."""
     scale_opts = layer_def.get("layerScaleVisibilityOptions", {})
     if scale_opts:
@@ -282,6 +330,38 @@ def _set_scale_visibility(layer: QgsVectorLayer, layer_def: dict):
     layer.setScaleBasedVisibility(True)
     layer.setMinimumScale(min_scale)
     layer.setMaximumScale(max_scale)
+
+def _set_temporal_properties(layer: QgsVectorLayer, layer_def: dict):
+    """
+    Configures the temporal properties of a layer based on ArcGIS time definitions.
+    This enables the use of the QGIS Temporal Controller.
+    """
+    feature_table = layer_def.get("featureTable", {})
+    time_fields = feature_table.get("timeFields", {})
+    
+    if not time_fields:
+        return
+
+    # Parse fields from JSON
+    start_field = time_fields.get("startTimeField")
+    end_field = time_fields.get("endTimeField")
+
+    if start_field:
+        tprops = layer.temporalProperties()
+        
+        # Enable temporal support for this layer
+        tprops.setIsActive(True)
+        
+        if end_field:
+            # Mode: Start and End fields
+            tprops.setMode(Qgis.VectorTemporalMode.FeatureDateTimeStartAndEndFromFields)
+            tprops.setEndField(end_field)
+        else:
+            # Mode: Single field (Instant)
+            tprops.setMode(Qgis.VectorTemporalMode.FeatureDateTimeInstantFromField)
+            
+        tprops.setStartField(start_field)
+        print(f"Enabled temporal properties for '{layer.name()}'. Start: {start_field}, End: {end_field}")
 
 
 def _set_metadata(layer: QgsVectorLayer, layer_def: dict):
@@ -376,58 +456,62 @@ def _set_field_aliases_and_visibility(layer: QgsVectorLayer, layer_def: dict):
     table_config.setColumns(new_columns)
     layer.setAttributeTableConfig(table_config)
 
-
 def _convert_feature_layer(in_folder, layer_def, out_file, project):
     layer_name = layer_def['name']
     f_table = layer_def["featureTable"]
     if f_table["type"] != "CIMFeatureTable":
         raise Exception(f"Unexpected feature table type: {f_table['type']}")
 
-    # Parse source: returns (abs_uri, rel_uri), join_info
+    # Parse source: returns (abs_uri, rel_uri, provider), join_info
     def_query = _parse_definition_query(layer_def)
-    (abs_uri, rel_uri), join_info = _parse_source(in_folder, f_table["dataConnection"], def_query, out_file)
+    (abs_uri, rel_uri, provider), join_info = _parse_source(in_folder, f_table["dataConnection"], def_query, out_file)
 
-    # Apply join if present
-    if join_info:
-        # Data source URIs
-        source_uri = abs_uri
-        join_uri = join_info["destinationAbs"]
+    # 1. Always load the primary layer directly first
+    #print(f"Loading layer '{layer_name}' with provider '{provider}' at {abs_uri}")
+    layer = QgsVectorLayer(abs_uri, layer_name, provider)
 
-        # Build SQL for the virtual layer
-        sql = f"""
-            SELECT f.*, j.*
-            FROM "{layer_def['name']}" AS f
-            LEFT JOIN "{join_info['destinationName']}" AS j
-            ON f."{join_info['primaryKey']}" = j."{join_info['foreignKey']}"
-        """
+    if not layer.isValid():
+        raise RuntimeError(f"Layer failed to load: {layer_name} {abs_uri} (Provider: {provider})")
 
-        # Create virtual layer definition
-        vl_def = QgsVirtualLayerDefinition()
-        vl_def.addSource(layer_def['name'], source_uri, "ogr", "")
-        vl_def.addSource(join_info['destinationName'], join_uri, "ogr", "")
-        vl_def.setQuery(sql)
-
-        # Create virtual layer
-        layer = QgsVectorLayer(vl_def.toString(), layer_name, "virtual")
-        if not layer.isValid():
-            raise RuntimeError(f"Virtual layer failed to create: {layer_name}")
-
-    else:
-        # No join, just load the feature layer normally
-        layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
-        if not layer.isValid():
-            raise RuntimeError(f"Layer failed to load: {layer_name} {abs_uri}")
-        
-        # Attempt to switch to relative URI for portable QLR files
-        # This is especially important for network drives where path resolution can be problematic
+    # Relative path fallback (for OGR)
+    if provider == "ogr":
         test_layer = QgsVectorLayer(rel_uri, f"test_{layer_name}", "ogr")
         if test_layer.isValid():
-            # Relative path works, switch the main layer to use it
             layer.setDataSource(rel_uri, layer.name(), layer.providerType())
             if not layer.isValid():
-                # If switching to relative path breaks the layer, recreate with absolute path
                 layer = QgsVectorLayer(abs_uri, layer_name, "ogr")
-        # If relative path doesn't work, keep using absolute path (no action needed)
+
+    # Add main layer to project (Registry only, not Legend/Tree yet)
+    project.addMapLayer(layer, False)
+
+    # 2. Apply join if present
+    join_layer = None
+    if join_info:
+        #print(f"  Applying native join to '{join_info['destinationName']}'...")
+
+        join_table_uri = join_info["destinationAbs"]
+        join_table_name = join_info['destinationName']
+        join_provider = join_info.get("destinationProvider", "ogr")
+
+        join_layer = QgsVectorLayer(join_table_uri, join_table_name, join_provider)
+
+        if join_layer.isValid():
+            # Add join layer to project (Registry only)
+            project.addMapLayer(join_layer, False)
+
+            # Create and apply the join
+            qgs_join = QgsVectorLayerJoinInfo()
+            qgs_join.setJoinLayer(join_layer)
+            qgs_join.setJoinFieldName(join_info['foreignKey'])
+            qgs_join.setTargetFieldName(join_info['primaryKey'])
+            qgs_join.setUsingMemoryCache(True)
+            qgs_join.setPrefix('') 
+            qgs_join.setJoinLayerId(join_layer.id()) # Critical for persistence
+
+            layer.addJoin(qgs_join)
+            layer.updateFields() # Critical for Identify tool
+        else:
+            print(f"  WARNING: Failed to load join table: {join_table_uri}")
 
     # Set other layer properties
     _set_display_field(layer, layer_def)
@@ -436,19 +520,14 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
     layer.setRenderer(qgis_renderer)
     _set_field_aliases_and_visibility(layer, layer_def)
     set_labels(layer, layer_def)
+    _set_temporal_properties(layer, layer_def)
 
     if not layer.isValid():
         raise RuntimeError(f"Layer became invalid after setting properties: {layer_name}")
 
-    project.addMapLayer(layer, False)
+    # Return both layers so the caller can add them to the layer tree/QLR
+    return layer, join_layer
 
-    root = project.layerTreeRoot()
-    node = root.addLayer(layer)
-    
-    # Set visibility if specified
-    if 'visibility' in layer_def:
-        node.setItemVisibilityChecked(layer_def['visibility'])
-    return layer
 
 def _convert_raster_layer(in_folder, layer_def, out_file, project):
     """
@@ -458,16 +537,13 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
     in a .lyrx file. It can be a standard dictionary or a complex XML string,
     which is common for rasters with functions applied. It parses the connection,
     builds the source URI, creates the QGIS layer, and applies symbology.
-
     Args:
         in_folder (str): The directory of the input .lyrx file.
         layer_def (dict): The layer definition dictionary from the parsed .lyrx JSON.
         out_file (str): The path for the output .qlr file.
         project (QgsProject): The active QgsProject instance.
-
     Returns:
         QgsRasterLayer: The created and configured QGIS raster layer.
-
     Raises:
         RuntimeError: If the data connection is missing or cannot be parsed, or if the
                       raster layer fails to load.
@@ -478,20 +554,16 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
     if not data_connection:
         raise RuntimeError(f"Raster layer '{layer_name}' is missing the 'dataConnection' definition.")
 
-    # Case 1: The data connection is an XML string that needs parsing.
     if isinstance(data_connection, str):
         parsed_connection = _parse_xml_dataconnection(data_connection)
         if not parsed_connection:
             raise RuntimeError(f"Failed to parse XML data connection for raster layer: {layer_name}")
         data_connection = parsed_connection
-
-    # Case 2: The data connection is a dict, but its 'dataset' field contains the XML.
     elif isinstance(data_connection, dict):
         dataset_value = data_connection.get('dataset', '')
         if isinstance(dataset_value, str) and '<' in dataset_value:
             parsed_connection = _parse_xml_dataconnection(dataset_value)
             if parsed_connection:
-                # Use the workspace from the parent dict if the parsed one is incomplete.
                 if 'workspaceConnectionString' in data_connection and parsed_connection.get('workspaceConnectionString') in (None, 'DATABASE='):
                     parsed_connection['workspaceConnectionString'] = data_connection['workspaceConnectionString']
                 data_connection = parsed_connection
@@ -501,22 +573,21 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
     if not isinstance(data_connection, dict):
         raise RuntimeError(f"Unexpected data_connection type: {type(data_connection)} for layer {layer_name}")
 
-    # Normalize keys (e.g., 'WorkspaceConnectionString' -> 'workspaceConnectionString') for consistency.
     data_connection = {k[0].lower() + k[1:]: v for k, v in data_connection.items()}
 
-    (abs_uri, rel_uri), _ = _parse_source(in_folder, data_connection, "", out_file)
+    # Unpack the new 3-item tuple (abs, rel, provider), ignoring provider for now as we default to gdal
+    (abs_uri, rel_uri, provider), _ = _parse_source(in_folder, data_connection, "", out_file)
 
-    # Suppress GDAL warnings
-    # Save the current logging setting and redirect logs to a null device.
     gdal_log_file = os.environ.get('CPL_LOG')
     os.environ['CPL_LOG'] = os.devnull
     rlayer = None
 
+    # Use the detected provider if possible, otherwise fallback to gdal
+    raster_provider = provider if provider else "gdal"
+    
     try:
-        # Create the raster layer. This is where the warnings are generated.
-        rlayer = QgsRasterLayer(abs_uri, layer_name, "gdal")
+        rlayer = QgsRasterLayer(abs_uri, layer_name, raster_provider)
     finally:
-        # Restore the original GDAL logging setting, whether the layer loaded successfully or not.
         if gdal_log_file:
             os.environ['CPL_LOG'] = gdal_log_file
         else:
@@ -530,75 +601,20 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
             error_msg += f"\nFile not found at '{abs_uri}'."
         raise RuntimeError(error_msg)
 
-    # Prefer a relative path in the saved QLR file for portability.
-    try:
-        test_layer = QgsRasterLayer(rel_uri, "test", "gdal")
-        if test_layer.isValid():
-            rlayer.setDataSource(rel_uri, rlayer.name(), rlayer.providerType())
-    except Exception:
-        print(f"Warning: Could not set relative path for raster layer '{layer_name}'; using absolute path in QLR.")
+    # Switch path (only for file-based gdal layers)
+    if raster_provider == "gdal":
+        try:
+            test_layer = QgsRasterLayer(rel_uri, "test", "gdal")
+            if test_layer.isValid():
+                switch_to_relative_path(rlayer, rel_uri)
+        except Exception as e:
+            print(f"Warning: Could not set relative path for raster layer '{layer_name}'; using absolute path in QLR. Error: {e}")
 
     apply_raster_symbology(rlayer, layer_def)
-    switch_to_relative_path(rlayer, rel_uri)
 
     project.addMapLayer(rlayer, False)
     return rlayer
 
-def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> None:
-    """
-    Exports a .qlr that contains a layer-tree entry with a "checked" (visible) state.
-
-    Why this is needed:
-      - QgsLayerDefinition.exportLayerDefinitionLayers(...) does NOT write any layer tree,
-        so it cannot preserve 'checked' visibility. We must export selected tree nodes instead.
-        (QGIS API: "This is a low-level routine that does not write layer tree.")  # noqa
-      - By creating a temporary layer-tree node (QgsLayerTreeLayer) and calling
-        QgsLayerDefinition.exportLayerDefinition(...), the resulting QLR includes
-        <layer-tree-layer ... checked="Qt::Checked"> (visibility on).  # noqa
-
-    Args:
-        out_layer (QgsMapLayer): the in-memory layer you constructed.
-        layer_def (dict): parsed LYRX layer definition (used to read ArcGIS 'visibility'/'expanded').
-        out_file (str): path to save the .qlr.
-    """
-    root = QgsProject.instance().layerTreeRoot()
-    node = root.findLayer(out_layer.id())
-    if node:
-        # Set visibility before exporting
-        if 'visibility' in layer_def:
-            node.setItemVisibilityChecked(layer_def['visibility'])
-
-        # Export to an in-memory string instead of a file
-        mem_file = io.StringIO()
-        ok, error_message = QgsLayerDefinition.exportLayerDefinition(mem_file, [node])
-        if not ok:
-            raise RuntimeError(f"Failed to export layer definition to memory: {error_message}")
-        
-        # Get the XML string from memory
-        qlr_content = mem_file.getvalue()
-        
-        # Post-process the XML string to inject symbol levels
-        final_qlr_content = VectorRenderer().post_process_qlr_for_symbol_levels(qlr_content, layer_def)
-
-        # Write the final, corrected content to the output file
-        print(f"  Attempting to write to: {out_file}")
-        print(f"  Content length: {len(final_qlr_content)} characters")
-        
-        try:
-            with open(out_file, 'w', encoding='utf-8') as f:
-                f.write(final_qlr_content)
-            print(f"  Successfully wrote file")
-            
-            # Verify the file was created
-            if os.path.exists(out_file):
-                print(f"  File verified to exist at: {out_file}")
-                print(f"  File size: {os.path.getsize(out_file)} bytes")
-            else:
-                print(f"  WARNING: File write succeeded but file doesn't exist!")
-        except Exception as e:
-            print(f"  ERROR writing file: {e}")
-            raise
-        
 def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, project):
     """
     Recursively processes a group layer and its children.
@@ -610,7 +626,7 @@ def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, projec
     group_node.setItemVisibilityChecked(bool(group_layer_def.get("visibility", True)))
     group_node.setExpanded(bool(group_layer_def.get("expanded", False)))
 
-    # Process child layers using the correct key: "layers"
+    # Process child layers
     for member_uri in group_layer_def.get("layers", []):
         member_def = next((ld for ld in lyrx_json.get("layerDefinitions", []) if ld.get("uRI") == member_uri), None)
         if not member_def:
@@ -620,19 +636,31 @@ def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, projec
         if layer_type == "CIMGroupLayer":
             child_group = _convert_group_layer(in_folder, member_def, lyrx_json, out_file, project)
             group_node.addChildNode(child_group)
+
         elif layer_type == "CIMFeatureLayer":
-            child_layer = _convert_feature_layer(in_folder, member_def, out_file, project)
+            child_layer, child_join_layer = _convert_feature_layer(in_folder, member_def, out_file, project)
+            
             _set_metadata(child_layer, member_def)
             _set_scale_visibility(child_layer, member_def)
+            _set_layer_transparency(child_layer, member_def)
+            
+            # Add main layer to group
             node = group_node.addLayer(child_layer)
             if node:
                 node.setItemVisibilityChecked(bool(member_def.get("visibility", True)))
                 node.setExpanded(bool(member_def.get("expanded", False)))
+            
+            # Add join layer to group (hidden) so it exports to QLR
+            if child_join_layer:
+                join_node = group_node.addLayer(child_join_layer)
+                join_node.setItemVisibilityChecked(False)
+                join_node.setExpanded(False)
 
         elif layer_type == 'CIMRasterLayer':
             child_layer = _convert_raster_layer(in_folder, member_def, out_file, project)
             _set_metadata(child_layer, member_def)
             _set_scale_visibility(child_layer, member_def)
+            _set_layer_transparency(child_layer, member_def)
             node = group_node.addLayer(child_layer)
             if node:
                 node.setItemVisibilityChecked(bool(member_def.get("visibility", True)))
@@ -669,22 +697,40 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         if layer_type == "CIMGroupLayer":
             root_node = _convert_group_layer(in_folder, layer_def, lyrx, out_file, project)
             nodes_to_export = [root_node]
+
         elif layer_type == "CIMFeatureLayer":
-            out_layer = _convert_feature_layer(in_folder, layer_def, out_file, project)
+            out_layer, join_layer = _convert_feature_layer(in_folder, layer_def, out_file, project)
             _set_metadata(out_layer, layer_def)
             _set_scale_visibility(out_layer, layer_def)
-            
-            # Get the layer tree node (it should exist now)
+            _set_layer_transparency(out_layer, layer_def)
+
+            # Add to root tree manually (since we removed it from _convert_feature_layer)
             root = QgsProject.instance().layerTreeRoot()
-            node = root.findLayer(out_layer.id())
+            node = root.addLayer(out_layer)
             if node:
-                nodes_to_export = [node]
+                if 'visibility' in layer_def:
+                    node.setItemVisibilityChecked(layer_def['visibility'])
+                nodes_to_export.append(node)
+            
+            # Add join layer to root tree (hidden) so it exports
+            if join_layer:
+                join_node = root.addLayer(join_layer)
+                join_node.setItemVisibilityChecked(False)
+                nodes_to_export.append(join_node)
                                 
         elif layer_type == 'CIMRasterLayer':
             out_layer = _convert_raster_layer(in_folder, layer_def, out_file, project)
             _set_metadata(out_layer, layer_def)
             _set_scale_visibility(out_layer, layer_def)
-            _export_qlr_with_visibility(out_layer, layer_def, out_file)
+            _set_layer_transparency(out_layer, layer_def)
+            
+            root = QgsProject.instance().layerTreeRoot()
+            node = root.addLayer(out_layer)
+            
+            if node:
+                if 'visibility' in layer_def:
+                    node.setItemVisibilityChecked(layer_def['visibility'])
+                nodes_to_export = [node]
 
         elif layer_type == 'CIMAnnotationLayer':
             print("Annotation layers are unsupported")
@@ -694,26 +740,20 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
 
         # Export the QLR including the layer tree node(s)
         if nodes_to_export:
-            # Create a temporary file for initial export
-            import tempfile
             with tempfile.NamedTemporaryFile(mode='w', suffix='.qlr', delete=False, encoding='utf-8') as temp_file:
                 temp_path = temp_file.name
             
             try:
-                # Export to temporary file
                 ok, error_message = QgsLayerDefinition.exportLayerDefinition(temp_path, nodes_to_export)
                 
                 if not ok:
                     raise RuntimeError(f"Failed to export layer definition: {error_message}")
                 
-                # Read the XML content from the temp file
                 with open(temp_path, 'r', encoding='utf-8') as f:
                     qlr_content = f.read()
                 
-                # Post-process for symbol level
                 final_qlr_content = VectorRenderer().post_process_qlr_for_symbol_levels(qlr_content, layer_def)
                 
-                # Write to the actual output file
                 with open(out_file, 'w', encoding='utf-8') as f:
                     f.write(final_qlr_content)
                 
@@ -727,7 +767,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         print(f"Error converting LYRX: {e}")
         raise
     finally:
-        project.clear()  # Clear the project instance for the next run
+        project.clear() # Clear the project instance for the next run
         if manage_qgs:
             qgs.exitQgis()
 

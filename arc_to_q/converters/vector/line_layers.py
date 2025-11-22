@@ -17,14 +17,14 @@ from .marker_layers import create_font_marker_from_character, create_simple_mark
 logger = logging.getLogger(__name__)
 
 # MANUAL TUNING: Adjust these values for specific character codes
-# Format: character_code: (rotation_adjustment, y_offset_adjustment)
 CHAR_ADJUSTMENTS = {
-    40: (0, -3),     # Thrust fault teeth - try 90° (or try -90 if that doesn't work)
-    38: (0, -1.7),     # Strike slip - vertical offset to center it
-    70: (0, -0.25),     # Anticline F - small vertical adjustment
-    77: (0, -0.7),     # Syncline M - small vertical adjustment
-    72: (0, 0),      # Arrowhead H - seems fine
-    82: (0, -0.5),      # Symbol R
+    40: (0, -3),      # Thrust fault teeth (USGS Font)
+    (35, "ESRI Default Marker"): (0, -2), # Thrust fault triangle (ESRI Default Marker)
+    38: (0, -1.7),    # Strike slip
+    70: (0, -0.25),   # Anticline F
+    77: (0, -0.7),    # Syncline M
+    72: (0, 0),       # Arrowhead H
+    82: (0, -0.5),    # Symbol R
 }
 
 
@@ -84,15 +84,22 @@ def create_character_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMa
         
         # Apply manual adjustments based on character code
         char_code = layer_def.get("characterIndex", 0)
-        if char_code in CHAR_ADJUSTMENTS:
-            rot_adj, y_offset_adj = CHAR_ADJUSTMENTS[char_code]
-            if rot_adj != 0:
-                sub_symbol_layer.setAngle(sub_symbol_layer.angle() + rot_adj)
-                #print(f"Applied manual rotation adjustment: +{rot_adj}° for char {char_code}")
-            if y_offset_adj != 0:
-                current_offset = sub_symbol_layer.offset()
-                sub_symbol_layer.setOffset(QPointF(current_offset.x(), current_offset.y() + y_offset_adj))
-                #print(f"Applied manual Y offset adjustment: +{y_offset_adj} for char {char_code}")
+        font_family = layer_def.get("fontFamilyName", "")
+        
+        rot_adj = 0
+        y_offset_adj = 0
+        
+        if (char_code, font_family) in CHAR_ADJUSTMENTS:
+             rot_adj, y_offset_adj = CHAR_ADJUSTMENTS[(char_code, font_family)]
+        elif char_code in CHAR_ADJUSTMENTS:
+             rot_adj, y_offset_adj = CHAR_ADJUSTMENTS[char_code]
+
+        if rot_adj != 0:
+            sub_symbol_layer.setAngle(sub_symbol_layer.angle() + rot_adj)
+        
+        if y_offset_adj != 0:
+            current_offset = sub_symbol_layer.offset()
+            sub_symbol_layer.setOffset(QPointF(current_offset.x(), current_offset.y() + y_offset_adj))
         
         marker_symbol = QgsMarkerSymbol([sub_symbol_layer])
         return _create_marker_line_layers_from_sub_symbol(marker_symbol, layer_def)
@@ -101,9 +108,28 @@ def create_character_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMa
         return []
 
 
+def _is_horizontal_vector_tick(layer_def: Dict[str, Any]) -> bool:
+    """Detects if a vector marker is a horizontal line segment rotated 90 degrees (Tick)."""
+    if layer_def.get("type") != "CIMVectorMarker": return False
+    
+    # Check rotation (approx 90)
+    rotation = layer_def.get("rotation", 0)
+    if abs(rotation - 90) > 1e-6: return False
+    
+    # Check geometry path
+    graphics = layer_def.get("markerGraphics", [])
+    if not graphics: return False
+    geo = graphics[0].get("geometry", {})
+    paths = geo.get("paths", [])
+    if not paths or len(paths[0]) != 2: return False
+    
+    p1, p2 = paths[0]
+    # Check if y-coordinates are essentially equal (Horizontal)
+    return abs(p1[1] - p2[1]) < 1e-6
+
+
 def create_vector_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMarkerLineSymbolLayer]:
     """Creates QGIS Marker Line layers from an ArcGIS CIMVectorMarker on a line."""
-    #print(f"\n@@@ VECTOR MARKER: size={layer_def.get('size')}, rotation={layer_def.get('rotation')}, interval={layer_def.get('markerPlacement', {}).get('placementTemplate')}")
     try:
         sub_symbol = QgsMarkerSymbol()
         sub_symbol.deleteSymbolLayer(0)
@@ -111,13 +137,17 @@ def create_vector_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMarke
             sub_symbol.appendSymbolLayer(sub_layer)
         else:
             return []
-        return _create_marker_line_layers_from_sub_symbol(sub_symbol, layer_def)
+            
+        # Detect if this is a Tick (Limit, Normal Fault) that needs offset inversion
+        invert_offset = _is_horizontal_vector_tick(layer_def)
+        
+        return _create_marker_line_layers_from_sub_symbol(sub_symbol, layer_def, invert_offset=invert_offset)
     except Exception as e:
         logger.error(f"Failed to create vector marker line layers: {e}")
         return []
 
 
-def _create_marker_line_layers_from_sub_symbol(sub_symbol: QgsMarkerSymbol, layer_def: Dict[str, Any]) -> List[QgsMarkerLineSymbolLayer]:
+def _create_marker_line_layers_from_sub_symbol(sub_symbol: QgsMarkerSymbol, layer_def: Dict[str, Any], invert_offset: bool = False) -> List[QgsMarkerLineSymbolLayer]:
     """Creates marker line layers for a given sub-symbol based on placement rules."""
     placement = layer_def.get("markerPlacement", {})
     placement_type = placement.get("type", "")
@@ -144,6 +174,11 @@ def _create_marker_line_layers_from_sub_symbol(sub_symbol: QgsMarkerSymbol, laye
         # Apply the perpendicular offset
         if "offset" in placement:
             offset_value = placement.get("offset", 0.0)
+            
+            # FIX: Invert offset for ticks that appear on the wrong side
+            if invert_offset:
+                offset_value = -offset_value
+                
             marker_layer.setOffset(offset_value)
             marker_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
         
