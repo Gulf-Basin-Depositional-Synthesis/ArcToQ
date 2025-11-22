@@ -154,7 +154,19 @@ def _parse_xml_dataconnection(xml_string: str) -> dict | None:
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
     """Helper to build absolute/relative URIs and determine provider type.
     
+    Args:
+        in_folder (str): Path to the folder containing the .lyrx file.
+        conn_str (str): The workspace connection string from the .lyrx file.
+        factory (str): The workspace factory type (e.g. "FileGDB", "Shapefile").
+        dataset (str): The dataset name (e.g. feature class or table name).
+        dataset_type (str): The dataset type (e.g. "esriDTRasterDataset", "esriDTFeatureClass").
+        def_query (str): The definition query string to append to the URI (or empty string).
+            The query should already be in QGIS-compatible format, including the leading "|subset=".
+        out_file (str): Path to the converted QGIS .qlr file.
     Returns:
+        tuple: (abs_uri, rel_uri)
+          - abs_uri: Absolute QGIS URI for the dataset
+          - rel_uri: Relative QGIS URI for the dataset
         tuple: (abs_uri, rel_uri, provider)
     """
     # --- Handle Web Feature Services ---
@@ -168,7 +180,7 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
         else:
             base_url = f"{url}/{dataset}"
             
-        # FIX: Create a proper QGIS URI for the 'arcgisfeatureserver' provider.
+        # Create a proper QGIS URI for the 'arcgisfeatureserver' provider.
         # It expects a string like: "url='https://.../MapServer/1' crs='...'"
         ds_uri = QgsDataSourceUri()
         ds_uri.setParam("url", base_url)
@@ -238,9 +250,21 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
     return abs_uri, rel_uri, provider
 
 def _parse_source(in_folder, data_connection, def_query, out_file):
-    """Build URIs and determine provider.
+    """Build both absolute and relative QGIS-friendly URIs for a dataset.
     
+    Handles both direct feature class connections and joined tables.
+    
+    Args:
+        in_folder (str): Path to the folder containing the .lyrx file.
+        data_connection (dict): The data connection info from the .lyrx file.
+        def_query (str): The definition query string to append to the URI (or empty string).
+            The query should already be in QGIS-compatible format, including the leading "|subset=".
+        out_file (str): Path to the converted QGIS .qlr file.
     Returns:
+        tuple: (abs_uri, rel_uri, join_info)
+          - abs_uri: Absolute QGIS URI for the base dataset
+          - rel_uri: Relative QGIS URI for the base dataset
+          - join_info: dict describing join (or None if not a join)
         tuple: ( (abs_uri, rel_uri, provider), join_info )
     """
     factory = data_connection.get("workspaceFactory")
@@ -508,6 +532,21 @@ def _convert_feature_layer(in_folder, layer_def, out_file, project):
 def _convert_raster_layer(in_folder, layer_def, out_file, project):
     """
     Creates a QgsRasterLayer from a CIMRasterLayer definition.
+
+    This function is designed to handle various formats for the 'dataConnection'
+    in a .lyrx file. It can be a standard dictionary or a complex XML string,
+    which is common for rasters with functions applied. It parses the connection,
+    builds the source URI, creates the QGIS layer, and applies symbology.
+    Args:
+        in_folder (str): The directory of the input .lyrx file.
+        layer_def (dict): The layer definition dictionary from the parsed .lyrx JSON.
+        out_file (str): The path for the output .qlr file.
+        project (QgsProject): The active QgsProject instance.
+    Returns:
+        QgsRasterLayer: The created and configured QGIS raster layer.
+    Raises:
+        RuntimeError: If the data connection is missing or cannot be parsed, or if the
+                      raster layer fails to load.
     """
     layer_name = layer_def.get("name", "Raster")
     data_connection = layer_def.get("dataConnection")
@@ -576,61 +615,6 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
     project.addMapLayer(rlayer, False)
     return rlayer
 
-def _export_qlr_with_visibility(out_layer, layer_def: dict, out_file: str) -> None:
-    """
-    Exports a .qlr that contains a layer-tree entry with a "checked" (visible) state.
-
-    Why this is needed:
-      - QgsLayerDefinition.exportLayerDefinitionLayers(...) does NOT write any layer tree,
-        so it cannot preserve 'checked' visibility. We must export selected tree nodes instead.
-        (QGIS API: "This is a low-level routine that does not write layer tree.")  # noqa
-      - By creating a temporary layer-tree node (QgsLayerTreeLayer) and calling
-        QgsLayerDefinition.exportLayerDefinition(...), the resulting QLR includes
-        <layer-tree-layer ... checked="Qt::Checked"> (visibility on).  # noqa
-
-    Args:
-        out_layer (QgsMapLayer): the in-memory layer you constructed.
-        layer_def (dict): parsed LYRX layer definition (used to read ArcGIS 'visibility'/'expanded').
-        out_file (str): path to save the .qlr.
-    """
-    root = QgsProject.instance().layerTreeRoot()
-    node = root.findLayer(out_layer.id())
-    if node:
-        # Set visibility before exporting
-        if 'visibility' in layer_def:
-            node.setItemVisibilityChecked(layer_def['visibility'])
-
-        # Export to an in-memory string instead of a file
-        mem_file = io.StringIO()
-        ok, error_message = QgsLayerDefinition.exportLayerDefinition(mem_file, [node])
-        if not ok:
-            raise RuntimeError(f"Failed to export layer definition to memory: {error_message}")
-        
-        # Get the XML string from memory
-        qlr_content = mem_file.getvalue()
-        
-        # Post-process the XML string to inject symbol levels
-        final_qlr_content = VectorRenderer().post_process_qlr_for_symbol_levels(qlr_content, layer_def)
-
-        # Write the final, corrected content to the output file
-        print(f"  Attempting to write to: {out_file}")
-        print(f"  Content length: {len(final_qlr_content)} characters")
-        
-        try:
-            with open(out_file, 'w', encoding='utf-8') as f:
-                f.write(final_qlr_content)
-            print(f"  Successfully wrote file")
-            
-            # Verify the file was created
-            if os.path.exists(out_file):
-                print(f"  File verified to exist at: {out_file}")
-                print(f"  File size: {os.path.getsize(out_file)} bytes")
-            else:
-                print(f"  WARNING: File write succeeded but file doesn't exist!")
-        except Exception as e:
-            print(f"  ERROR writing file: {e}")
-            raise
-        
 def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, project):
     """
     Recursively processes a group layer and its children.
@@ -754,7 +738,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         else:
             raise Exception(f"Unhandled layer type: {layer_type}")
 
-        # Export the QLR
+        # Export the QLR including the layer tree node(s)
         if nodes_to_export:
             with tempfile.NamedTemporaryFile(mode='w', suffix='.qlr', delete=False, encoding='utf-8') as temp_file:
                 temp_path = temp_file.name
@@ -774,6 +758,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
                     f.write(final_qlr_content)
                 
             finally:
+                # Clean up the temporary file
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
 
@@ -782,7 +767,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         print(f"Error converting LYRX: {e}")
         raise
     finally:
-        project.clear()
+        project.clear() # Clear the project instance for the next run
         if manage_qgs:
             qgs.exitQgis()
 
