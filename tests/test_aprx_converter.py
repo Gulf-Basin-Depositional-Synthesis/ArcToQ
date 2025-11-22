@@ -3,6 +3,7 @@
 
 Run this TWICE:
 1. First in ArcGIS Pro Python Command Prompt:
+   cd G:\Projects\QGIS Support\ArcToQ
    python tests\test_aprx_converter.py
 
 2. Then in QGIS:
