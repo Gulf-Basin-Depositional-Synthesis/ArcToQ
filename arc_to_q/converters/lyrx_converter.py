@@ -272,11 +272,11 @@ def _parse_source(in_folder, data_connection, def_query, out_file):
     dataset = data_connection.get("dataset")
     dataset_type = data_connection.get("datasetType")
 
-    # --- Handle direct connections ---
+    # --- Handle direct connections (FileGDB, Shapefile, Raster) ---
     if factory and conn_str and dataset:
         return _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file), None
 
-    # --- Handle table join ---
+    # --- Handle table join (CIMRelQueryTableDataConnection) ---
     if data_connection.get("type") == "CIMRelQueryTableDataConnection":
         if def_query:
             raise NotImplementedError("Definition queries on joined layers are not yet supported.")
