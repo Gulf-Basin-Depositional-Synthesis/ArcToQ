@@ -9,13 +9,16 @@ import tempfile
 import os
 import hashlib
 from pathlib import Path
+import json
 from typing import Optional, Dict, Any
 
 from qgis.core import (
     QgsMarkerSymbol, QgsPointPatternFillSymbolLayer, QgsSimpleFillSymbolLayer,
     QgsRasterFillSymbolLayer, QgsSymbolLayer, QgsUnitTypes, 
-    QgsGradientFillSymbolLayer, QgsGradientStop, QgsGradientColorRamp
+    QgsGradientFillSymbolLayer, QgsGradientStop, QgsGradientColorRamp,
+    QgsLinePatternFillSymbolLayer, QgsSymbolLayerUtils, QgsSimpleLineSymbolLayer, QgsFillSymbol
 )
+
 from qgis.PyQt.QtCore import Qt, QByteArray, QBuffer, QIODevice, QPointF
 from qgis.PyQt.QtGui import QColor, QImage
 
@@ -73,37 +76,131 @@ def _create_stroke_as_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsSymbo
     return create_solid_stroke_layer(layer_def)
 
 
-def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsSimpleFillSymbolLayer:
-    """Creates a hatch fill layer by mapping rotation to a QGIS BrushStyle."""
-    hatch_fill = QgsSimpleFillSymbolLayer()
+def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsLinePatternFillSymbolLayer:
+    """
+    Creates a QgsLinePatternFillSymbolLayer from a CIM definition.
     
-    # 1. Get rotation and normalize it to 0-179 range
-    # This handles negative angles (-90 -> 90) and standardizes geometry
-    raw_rotation = layer_def.get("rotation", 0.0)
-    normalized_rotation = int(raw_rotation) % 180
+    IMPROVEMENT:
+    - Implements a 'Width Damper'. ArcGIS often uses thick stroke widths (e.g. 3pt, 4pt)
+      that look fine in print but render as solid blocks on QGIS screens.
+    - This logic caps the line width to ensure the 'Gap' is always visible.
+    """
+    hatch_fill = QgsLinePatternFillSymbolLayer()
+    layer_name = layer_def.get("name", "Unnamed Layer")
     
-    # 2. Map normalized angles to Qt Patterns
-    # 0 = Horizontal, 90 = Vertical, 45 = BDiag (///), 135 = FDiag (\\\)
-    style_map = {
-        0: Qt.HorPattern, 
-        90: Qt.VerPattern,
-        45: Qt.BDiagPattern, 
-        135: Qt.FDiagPattern
-    }
-    
-    brush_style = style_map.get(normalized_rotation, Qt.SolidPattern)
-    
-    if brush_style == Qt.SolidPattern and normalized_rotation not in [0, 90, 45, 135]:
-        logger.warning(f"Unsupported CIMHatchFill rotation: {raw_rotation} (Norm: {normalized_rotation}). Defaulting to solid.")
-    
-    hatch_fill.setBrushStyle(brush_style)
+    print("\n" + "="*60)
+    print(f"[DEBUG] Processing Hatch: '{layer_name}'")
 
-    line_def = layer_def.get("lineSymbol", {}).get("symbolLayers", [{}])[0]
-    if color_def := line_def.get("color"):
-        hatch_fill.setColor(parse_color(color_def) or QColor("black"))
+    # ------------------------------------------------------------------
+    # 1. Angle (Rotation)
+    # ------------------------------------------------------------------
+    rotation = layer_def.get("rotation")
+    if rotation is None:
+        rotation = layer_def.get("Angle") or layer_def.get("angle") or 0.0
 
-    hatch_fill.setStrokeStyle(Qt.NoPen)
+    try:
+        rotation = float(rotation)
+    except (ValueError, TypeError):
+        rotation = 0.0
+
+    hatch_fill.setLineAngle(rotation)
+
+    # ------------------------------------------------------------------
+    # 2. Extract Raw Width & Spacing First (To Compare Them)
+    # ------------------------------------------------------------------
+    
+    # --- GET WIDTH ---
+    line_symbol_def = layer_def.get("lineSymbol") or layer_def.get("LineSymbol") or {}
+    symbol_layers = line_symbol_def.get("symbolLayers") or []
+    
+    stroke_def = None
+    for sl in symbol_layers:
+        if sl.get("type") == "CIMSolidStroke":
+            stroke_def = sl
+            break
+    
+    raw_width = 0.7
+    if stroke_def:
+        w_val = stroke_def.get("width")
+        try:
+            raw_width = float(w_val) if w_val is not None else 0.7
+        except (ValueError, TypeError):
+            raw_width = 0.7
+
+    # --- GET SPACING ---
+    raw_spacing_val = layer_def.get("separation") or layer_def.get("Separation") or layer_def.get("spacing")
+    raw_spacing = 5.0
+    try:
+        if raw_spacing_val is not None:
+            raw_spacing = float(raw_spacing_val)
+    except (ValueError, TypeError):
+        raw_spacing = 5.0
+
+    print(f"[DEBUG] Input -> Width: {raw_width} | Spacing: {raw_spacing}")
+
+    # ------------------------------------------------------------------
+    # 3. The "Width Damper" & "Gap Safety" Logic
+    # ------------------------------------------------------------------
+    
+    final_width = raw_width
+    final_spacing = raw_spacing
+
+    # CHECK: Is the gap too small? (Gap = Spacing - Width)
+    gap = raw_spacing - raw_width
+    
+    # If the gap is tiny (< 2.0) or the width is massive (> 2.0), 
+    # the hatch will look like a solid block in QGIS.
+    
+    if raw_width > 1.5 or gap < 1.5:
+        print(f"[DEBUG] DETECTED POOR VISIBILITY (Gap: {gap}, Width: {raw_width})")
+        
+        # STRATEGY: Reduce Width first.
+        # Thick lines (3pt+) are the main culprit. We clamp them to 1.5pt max.
+        # This instantly recovers whitespace without changing the pattern density.
+        if raw_width > 1.5:
+            final_width = 1.5
+            print(f"        ACTION: Clamped Line Width {raw_width} -> {final_width}")
+        
+        # RE-CHECK GAP with new width
+        new_gap = final_spacing - final_width
+        
+        # If gap is STILL too small (e.g. Spacing was 2.0), verify spacing
+        if new_gap < 2.0:
+            # Enforce a minimum spacing based on the new width
+            # We want the spacing to be at least Width + 2.0 (creating a 2pt gap)
+            min_spacing = final_width + 2.5 
+            if final_spacing < min_spacing:
+                final_spacing = min_spacing
+                print(f"        ACTION: Increased Spacing {raw_spacing} -> {final_spacing}")
+        
+    # ------------------------------------------------------------------
+    # 4. Apply Properties
+    # ------------------------------------------------------------------
+    
+    # Color
+    color = QColor(0, 0, 0)
+    if stroke_def:
+        color_def = stroke_def.get("color")
+        if color_def:
+            try:
+                parsed_c = parse_color(color_def) # Ensure parse_color is available
+                if isinstance(parsed_c, QColor):
+                    color = parsed_c
+            except Exception:
+                pass
+
+    hatch_fill.setLineWidth(final_width)
+    hatch_fill.setLineWidthUnit(QgsUnitTypes.RenderPoints)
+    hatch_fill.setColor(color)
+
+    hatch_fill.setDistance(final_spacing)
+    hatch_fill.setDistanceUnit(QgsUnitTypes.RenderPoints)
+    
+    print(f"[DEBUG] FINAL -> Width: {final_width} | Spacing: {final_spacing}")
+    print("="*60 + "\n")
+
     return hatch_fill
+
 
 def _create_gradient_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsGradientFillSymbolLayer]:
     """
