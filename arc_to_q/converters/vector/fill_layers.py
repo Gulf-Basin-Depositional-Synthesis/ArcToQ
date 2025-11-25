@@ -80,13 +80,18 @@ def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsLinePatternFillSym
     """
     Creates a QgsLinePatternFillSymbolLayer from a CIM definition.
     
-    IMPROVEMENT:
-    - Implements a 'Width Damper'. ArcGIS often uses thick stroke widths (e.g. 3pt, 4pt)
-      that look fine in print but render as solid blocks on QGIS screens.
-    - This logic caps the line width to ensure the 'Gap' is always visible.
+    ADJUSTMENTS:
+    1. SPACING: Scaled by 2.0x to match ArcGIS 'airy' look.
+    2. WIDTH: Scaled by 0.8x AND Capped at 1.2pt. 
+       (This fixes the 'too thick' look for 1.5pt lines).
     """
     hatch_fill = QgsLinePatternFillSymbolLayer()
     layer_name = layer_def.get("name", "Unnamed Layer")
+    
+    # --- TUNING KNOBS ---
+    SPACING_MULTIPLIER = 2.0   # Makes the pattern wider (Air Gap)
+    WIDTH_MULTIPLIER = 0.8     # Slims down the lines (Ink Reduction)
+    MAX_WIDTH = 1.2            # Hard limit on line thickness
     
     print("\n" + "="*60)
     print(f"[DEBUG] Processing Hatch: '{layer_name}'")
@@ -106,7 +111,7 @@ def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsLinePatternFillSym
     hatch_fill.setLineAngle(rotation)
 
     # ------------------------------------------------------------------
-    # 2. Extract Raw Width & Spacing First (To Compare Them)
+    # 2. Extract Raw Width & Spacing
     # ------------------------------------------------------------------
     
     # --- GET WIDTH ---
@@ -136,43 +141,32 @@ def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsLinePatternFillSym
     except (ValueError, TypeError):
         raw_spacing = 5.0
 
-    print(f"[DEBUG] Input -> Width: {raw_width} | Spacing: {raw_spacing}")
+    print(f"[DEBUG] Raw Input -> Width: {raw_width} | Spacing: {raw_spacing}")
 
     # ------------------------------------------------------------------
-    # 3. The "Width Damper" & "Gap Safety" Logic
+    # 3. Apply Visual Scaling (Slimming & Spreading)
     # ------------------------------------------------------------------
     
-    final_width = raw_width
-    final_spacing = raw_spacing
+    # A. Apply Width Reduction
+    # We multiply by 0.8 to slim it, then clamp to MAX_WIDTH (1.2)
+    calculated_width = raw_width * WIDTH_MULTIPLIER
+    
+    final_width = min(calculated_width, MAX_WIDTH)
+    
+    if final_width != raw_width:
+        print(f"[DEBUG] Action: Slimmed Width {raw_width} -> {final_width} (Scale: {WIDTH_MULTIPLIER}, Max: {MAX_WIDTH})")
 
-    # CHECK: Is the gap too small? (Gap = Spacing - Width)
-    gap = raw_spacing - raw_width
+    # B. Apply Spacing Inflation
+    # We multiply spacing by 2.0 to open up the pattern
+    final_spacing = raw_spacing * SPACING_MULTIPLIER
     
-    # If the gap is tiny (< 2.0) or the width is massive (> 2.0), 
-    # the hatch will look like a solid block in QGIS.
-    
-    if raw_width > 1.5 or gap < 1.5:
-        print(f"[DEBUG] DETECTED POOR VISIBILITY (Gap: {gap}, Width: {raw_width})")
-        
-        # STRATEGY: Reduce Width first.
-        # Thick lines (3pt+) are the main culprit. We clamp them to 1.5pt max.
-        # This instantly recovers whitespace without changing the pattern density.
-        if raw_width > 1.5:
-            final_width = 1.5
-            print(f"        ACTION: Clamped Line Width {raw_width} -> {final_width}")
-        
-        # RE-CHECK GAP with new width
-        new_gap = final_spacing - final_width
-        
-        # If gap is STILL too small (e.g. Spacing was 2.0), verify spacing
-        if new_gap < 2.0:
-            # Enforce a minimum spacing based on the new width
-            # We want the spacing to be at least Width + 2.0 (creating a 2pt gap)
-            min_spacing = final_width + 2.5 
-            if final_spacing < min_spacing:
-                final_spacing = min_spacing
-                print(f"        ACTION: Increased Spacing {raw_spacing} -> {final_spacing}")
-        
+    # C. Safety Check (Prevent overlaps)
+    gap = final_spacing - final_width
+    if gap < 1.5:
+        # If the gap is still too tight, force it open based on the NEW width
+        print(f"[DEBUG] WARNING: Gap too small ({gap}). Forcing minimum gap.")
+        final_spacing = final_width + 3.0 # Ensure at least 3pt of white space
+
     # ------------------------------------------------------------------
     # 4. Apply Properties
     # ------------------------------------------------------------------
@@ -183,7 +177,7 @@ def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsLinePatternFillSym
         color_def = stroke_def.get("color")
         if color_def:
             try:
-                parsed_c = parse_color(color_def) # Ensure parse_color is available
+                parsed_c = parse_color(color_def) 
                 if isinstance(parsed_c, QColor):
                     color = parsed_c
             except Exception:
@@ -196,11 +190,10 @@ def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsLinePatternFillSym
     hatch_fill.setDistance(final_spacing)
     hatch_fill.setDistanceUnit(QgsUnitTypes.RenderPoints)
     
-    print(f"[DEBUG] FINAL -> Width: {final_width} | Spacing: {final_spacing}")
+    print(f"[DEBUG] FINAL APPLIED -> Width: {final_width} | Spacing: {final_spacing}")
     print("="*60 + "\n")
 
     return hatch_fill
-
 
 def _create_gradient_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsGradientFillSymbolLayer]:
     """
