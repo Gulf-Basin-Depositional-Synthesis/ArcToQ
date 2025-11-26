@@ -80,117 +80,121 @@ def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsLinePatternFillSym
     """
     Creates a QgsLinePatternFillSymbolLayer from a CIM definition.
     
-    ADJUSTMENTS:
-    1. SPACING: Scaled by 2.0x to match ArcGIS 'airy' look.
-    2. WIDTH: Scaled by 0.8x AND Capped at 1.2pt. 
-       (This fixes the 'too thick' look for 1.5pt lines).
+    REWRITE LOGIC:
+    1. PARITY: Removed arbitrary multipliers (2.0x, 0.8x) and caps.
+    2. UNITS: Converts all input (Points) to Millimeters (0.352778 scaling).
+    3. ENGINE: Sets QGIS render units to Millimeters to match physical output.
     """
     hatch_fill = QgsLinePatternFillSymbolLayer()
     layer_name = layer_def.get("name", "Unnamed Layer")
     
-    # --- TUNING KNOBS ---
-    SPACING_MULTIPLIER = 2.0   # Makes the pattern wider (Air Gap)
-    WIDTH_MULTIPLIER = 0.8     # Slims down the lines (Ink Reduction)
-    MAX_WIDTH = 1.2            # Hard limit on line thickness
-    
+    # --- PARITY CONSTANTS ---
+    # ArcGIS uses PostScript Points (1/72 inch). QGIS works best in Millimeters.
+    # 1 Point = 0.352777778 mm
+    PT_TO_MM = 0.352777778
+
     print("\n" + "="*60)
-    print(f"[DEBUG] Processing Hatch: '{layer_name}'")
+    print(f" Processing Hatch: '{layer_name}' with Parity Mode")
 
     # ------------------------------------------------------------------
     # 1. Angle (Rotation)
     # ------------------------------------------------------------------
+    # ArcGIS and QGIS both use CCW rotation from East (0 degrees).
+    # No conversion needed usually, but normalization is good practice.
     rotation = layer_def.get("rotation")
     if rotation is None:
         rotation = layer_def.get("Angle") or layer_def.get("angle") or 0.0
 
     try:
-        rotation = float(rotation)
+        rotation = float(rotation) % 360
     except (ValueError, TypeError):
         rotation = 0.0
 
     hatch_fill.setLineAngle(rotation)
 
     # ------------------------------------------------------------------
-    # 2. Extract Raw Width & Spacing
+    # 2. Extract Raw Properties (in Points)
     # ------------------------------------------------------------------
     
-    # --- GET WIDTH ---
+    # --- GET STROKE WIDTH (Points) ---
     line_symbol_def = layer_def.get("lineSymbol") or layer_def.get("LineSymbol") or {}
     symbol_layers = line_symbol_def.get("symbolLayers") or []
-    
+
     stroke_def = None
     for sl in symbol_layers:
-        if sl.get("type") == "CIMSolidStroke":
+        # We look for the stroke definition to get width and color
+        if sl.get("type") in ["CIMSolidStroke", "SolidStroke"]:
             stroke_def = sl
             break
     
-    raw_width = 0.7
+    raw_width_pt = 0.7 # Default ArcGIS width
     if stroke_def:
         w_val = stroke_def.get("width")
         try:
-            raw_width = float(w_val) if w_val is not None else 0.7
+            raw_width_pt = float(w_val) if w_val is not None else 0.7
         except (ValueError, TypeError):
-            raw_width = 0.7
+            raw_width_pt = 0.7
 
-    # --- GET SPACING ---
+    # --- GET SPACING / SEPARATION (Points) ---
+    # ArcGIS 'Separation' is center-to-center, same as QGIS 'Distance' [1, 2]
     raw_spacing_val = layer_def.get("separation") or layer_def.get("Separation") or layer_def.get("spacing")
-    raw_spacing = 5.0
+    raw_spacing_pt = 5.0 # Default
     try:
         if raw_spacing_val is not None:
-            raw_spacing = float(raw_spacing_val)
+            raw_spacing_pt = float(raw_spacing_val)
     except (ValueError, TypeError):
-        raw_spacing = 5.0
+        raw_spacing_pt = 5.0
 
-    print(f"[DEBUG] Raw Input -> Width: {raw_width} | Spacing: {raw_spacing}")
-
-    # ------------------------------------------------------------------
-    # 3. Apply Visual Scaling (Slimming & Spreading)
-    # ------------------------------------------------------------------
-    
-    # A. Apply Width Reduction
-    # We multiply by 0.8 to slim it, then clamp to MAX_WIDTH (1.2)
-    calculated_width = raw_width * WIDTH_MULTIPLIER
-    
-    final_width = min(calculated_width, MAX_WIDTH)
-    
-    if final_width != raw_width:
-        print(f"[DEBUG] Action: Slimmed Width {raw_width} -> {final_width} (Scale: {WIDTH_MULTIPLIER}, Max: {MAX_WIDTH})")
-
-    # B. Apply Spacing Inflation
-    # We multiply spacing by 2.0 to open up the pattern
-    final_spacing = raw_spacing * SPACING_MULTIPLIER
-    
-    # C. Safety Check (Prevent overlaps)
-    gap = final_spacing - final_width
-    if gap < 1.5:
-        # If the gap is still too tight, force it open based on the NEW width
-        print(f"[DEBUG] WARNING: Gap too small ({gap}). Forcing minimum gap.")
-        final_spacing = final_width + 3.0 # Ensure at least 3pt of white space
+    # --- GET OFFSET (Points) ---
+    raw_offset_val = layer_def.get("offset") or layer_def.get("Offset")
+    raw_offset_pt = 0.0
+    try:
+        if raw_offset_val is not None:
+            raw_offset_pt = float(raw_offset_val)
+    except (ValueError, TypeError):
+        raw_offset_pt = 0.0
 
     # ------------------------------------------------------------------
-    # 4. Apply Properties
+    # 3. Apply Parity Conversion (Points -> Millimeters)
     # ------------------------------------------------------------------
     
-    # Color
+    # We strip the "Work Arounds". If parity is correct, 
+    # the visual weight will match without artificial thinning.
+    
+    final_width_mm = raw_width_pt * PT_TO_MM
+    final_spacing_mm = raw_spacing_pt * PT_TO_MM
+    final_offset_mm = raw_offset_pt * PT_TO_MM
+
+    print(f" Conversion: {raw_width_pt}pt -> {final_width_mm:.3f}mm | {raw_spacing_pt}pt -> {final_spacing_mm:.3f}mm")
+
+    # ------------------------------------------------------------------
+    # 4. Apply Properties to QGIS Layer
+    # ------------------------------------------------------------------
+    
+    # Color Parsing
     color = QColor(0, 0, 0)
     if stroke_def:
         color_def = stroke_def.get("color")
         if color_def:
             try:
+                # Assuming parse_color is a helper function you have defined elsewhere
                 parsed_c = parse_color(color_def) 
                 if isinstance(parsed_c, QColor):
                     color = parsed_c
             except Exception:
                 pass
 
-    hatch_fill.setLineWidth(final_width)
-    hatch_fill.setLineWidthUnit(QgsUnitTypes.RenderPoints)
+    # Apply Configuration with explicit Millimeter units
+    hatch_fill.setLineWidth(final_width_mm)
+    hatch_fill.setLineWidthUnit(QgsUnitTypes.RenderMillimeters) # CHANGED from RenderPoints
     hatch_fill.setColor(color)
 
-    hatch_fill.setDistance(final_spacing)
-    hatch_fill.setDistanceUnit(QgsUnitTypes.RenderPoints)
+    hatch_fill.setDistance(final_spacing_mm)
+    hatch_fill.setDistanceUnit(QgsUnitTypes.RenderMillimeters) # CHANGED from RenderPoints
     
-    print(f"[DEBUG] FINAL APPLIED -> Width: {final_width} | Spacing: {final_spacing}")
+    hatch_fill.setOffset(final_offset_mm)
+    hatch_fill.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
+
     print("="*60 + "\n")
 
     return hatch_fill
