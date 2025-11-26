@@ -86,15 +86,10 @@ def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsLinePatternFillSym
     3. ENGINE: Sets QGIS render units to Millimeters to match physical output.
     """
     hatch_fill = QgsLinePatternFillSymbolLayer()
-    layer_name = layer_def.get("name", "Unnamed Layer")
     
-    # --- PARITY CONSTANTS ---
     # ArcGIS uses PostScript Points (1/72 inch). QGIS works best in Millimeters.
     # 1 Point = 0.352777778 mm
     PT_TO_MM = 0.352777778
-
-    print("\n" + "="*60)
-    print(f" Processing Hatch: '{layer_name}' with Parity Mode")
 
     # ------------------------------------------------------------------
     # 1. Angle (Rotation)
@@ -165,8 +160,6 @@ def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsLinePatternFillSym
     final_spacing_mm = raw_spacing_pt * PT_TO_MM
     final_offset_mm = raw_offset_pt * PT_TO_MM
 
-    print(f" Conversion: {raw_width_pt}pt -> {final_width_mm:.3f}mm | {raw_spacing_pt}pt -> {final_spacing_mm:.3f}mm")
-
     # ------------------------------------------------------------------
     # 4. Apply Properties to QGIS Layer
     # ------------------------------------------------------------------
@@ -194,8 +187,6 @@ def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsLinePatternFillSym
     
     hatch_fill.setOffset(final_offset_mm)
     hatch_fill.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
-
-    print("="*60 + "\n")
 
     return hatch_fill
 
