@@ -4,20 +4,25 @@ Handles solid, hatch, picture, and other fill types.
 """
 import logging
 import base64
+import math
 import tempfile
 import os
 import hashlib
 from pathlib import Path
+import json
 from typing import Optional, Dict, Any
 
 from qgis.core import (
     QgsMarkerSymbol, QgsPointPatternFillSymbolLayer, QgsSimpleFillSymbolLayer,
-    QgsRasterFillSymbolLayer, QgsSymbolLayer, QgsUnitTypes
+    QgsRasterFillSymbolLayer, QgsSymbolLayer, QgsUnitTypes, 
+    QgsGradientFillSymbolLayer, QgsGradientStop, QgsGradientColorRamp,
+    QgsLinePatternFillSymbolLayer, QgsSymbolLayerUtils, QgsSimpleLineSymbolLayer, QgsFillSymbol
 )
-from qgis.PyQt.QtCore import Qt, QByteArray, QBuffer, QIODevice
+
+from qgis.PyQt.QtCore import Qt, QByteArray, QBuffer, QIODevice, QPointF
 from qgis.PyQt.QtGui import QColor, QImage
 
-from arc_to_q.converters.utils import parse_color
+from arc_to_q.converters.utils import parse_color, extract_colors_from_ramp
 from .line_layers import create_solid_stroke_layer
 from .marker_layers import create_font_marker_from_character
 
@@ -37,6 +42,8 @@ def create_fill_layer_from_def(layer_def: Dict[str, Any]) -> Optional[QgsSymbolL
         return _create_stroke_as_fill_layer(layer_def)
     elif layer_type == "CIMHatchFill":
         return _create_hatch_fill_layer(layer_def)
+    elif layer_type == "CIMGradientFill":        
+        return _create_gradient_fill_layer(layer_def)
     elif layer_type == "CIMPictureFill":
         return _create_picture_fill_layer(layer_def)
     elif layer_type == "CIMCharacterMarker":
@@ -69,37 +76,212 @@ def _create_stroke_as_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsSymbo
     return create_solid_stroke_layer(layer_def)
 
 
-def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsSimpleFillSymbolLayer:
-    """Creates a hatch fill layer by mapping rotation to a QGIS BrushStyle."""
-    hatch_fill = QgsSimpleFillSymbolLayer()
+def _create_hatch_fill_layer(layer_def: Dict[str, Any]) -> QgsLinePatternFillSymbolLayer:
+    """
+    Creates a QgsLinePatternFillSymbolLayer from a CIM definition.
     
-    # 1. Get rotation and normalize it to 0-179 range
-    # This handles negative angles (-90 -> 90) and standardizes geometry
-    raw_rotation = layer_def.get("rotation", 0.0)
-    normalized_rotation = int(raw_rotation) % 180
+    REWRITE LOGIC:
+    1. PARITY: Removed arbitrary multipliers (2.0x, 0.8x) and caps.
+    2. UNITS: Converts all input (Points) to Millimeters (0.352778 scaling).
+    3. ENGINE: Sets QGIS render units to Millimeters to match physical output.
+    """
+    hatch_fill = QgsLinePatternFillSymbolLayer()
     
-    # 2. Map normalized angles to Qt Patterns
-    # 0 = Horizontal, 90 = Vertical, 45 = BDiag (///), 135 = FDiag (\\\)
-    style_map = {
-        0: Qt.HorPattern, 
-        90: Qt.VerPattern,
-        45: Qt.BDiagPattern, 
-        135: Qt.FDiagPattern
-    }
-    
-    brush_style = style_map.get(normalized_rotation, Qt.SolidPattern)
-    
-    if brush_style == Qt.SolidPattern and normalized_rotation not in [0, 90, 45, 135]:
-        logger.warning(f"Unsupported CIMHatchFill rotation: {raw_rotation} (Norm: {normalized_rotation}). Defaulting to solid.")
-    
-    hatch_fill.setBrushStyle(brush_style)
+    # ArcGIS uses PostScript Points (1/72 inch). QGIS works best in Millimeters.
+    # 1 Point = 0.352777778 mm
+    PT_TO_MM = 0.352777778
 
-    line_def = layer_def.get("lineSymbol", {}).get("symbolLayers", [{}])[0]
-    if color_def := line_def.get("color"):
-        hatch_fill.setColor(parse_color(color_def) or QColor("black"))
+    # ------------------------------------------------------------------
+    # 1. Angle (Rotation)
+    # ------------------------------------------------------------------
+    # ArcGIS and QGIS both use CCW rotation from East (0 degrees).
+    # No conversion needed usually, but normalization is good practice.
+    rotation = layer_def.get("rotation")
+    if rotation is None:
+        rotation = layer_def.get("Angle") or layer_def.get("angle") or 0.0
 
-    hatch_fill.setStrokeStyle(Qt.NoPen)
+    try:
+        rotation = float(rotation) % 360
+    except (ValueError, TypeError):
+        rotation = 0.0
+
+    hatch_fill.setLineAngle(rotation)
+
+    # ------------------------------------------------------------------
+    # 2. Extract Raw Properties (in Points)
+    # ------------------------------------------------------------------
+    
+    # --- GET STROKE WIDTH (Points) ---
+    line_symbol_def = layer_def.get("lineSymbol") or layer_def.get("LineSymbol") or {}
+    symbol_layers = line_symbol_def.get("symbolLayers") or []
+
+    stroke_def = None
+    for sl in symbol_layers:
+        # We look for the stroke definition to get width and color
+        if sl.get("type") in ["CIMSolidStroke", "SolidStroke"]:
+            stroke_def = sl
+            break
+    
+    raw_width_pt = 0.7 # Default ArcGIS width
+    if stroke_def:
+        w_val = stroke_def.get("width")
+        try:
+            raw_width_pt = float(w_val) if w_val is not None else 0.7
+        except (ValueError, TypeError):
+            raw_width_pt = 0.7
+
+    # --- GET SPACING / SEPARATION (Points) ---
+    # ArcGIS 'Separation' is center-to-center, same as QGIS 'Distance' [1, 2]
+    raw_spacing_val = layer_def.get("separation") or layer_def.get("Separation") or layer_def.get("spacing")
+    raw_spacing_pt = 5.0 # Default
+    try:
+        if raw_spacing_val is not None:
+            raw_spacing_pt = float(raw_spacing_val)
+    except (ValueError, TypeError):
+        raw_spacing_pt = 5.0
+
+    # --- GET OFFSET (Points) ---
+    raw_offset_val = layer_def.get("offset") or layer_def.get("Offset")
+    raw_offset_pt = 0.0
+    try:
+        if raw_offset_val is not None:
+            raw_offset_pt = float(raw_offset_val)
+    except (ValueError, TypeError):
+        raw_offset_pt = 0.0
+
+    # ------------------------------------------------------------------
+    # 3. Apply Parity Conversion (Points -> Millimeters)
+    # ------------------------------------------------------------------
+    
+    # We strip the "Work Arounds". If parity is correct, 
+    # the visual weight will match without artificial thinning.
+    
+    final_width_mm = raw_width_pt * PT_TO_MM
+    final_spacing_mm = raw_spacing_pt * PT_TO_MM
+    final_offset_mm = raw_offset_pt * PT_TO_MM
+
+    # ------------------------------------------------------------------
+    # 4. Apply Properties to QGIS Layer
+    # ------------------------------------------------------------------
+    
+    # Color Parsing
+    color = QColor(0, 0, 0)
+    if stroke_def:
+        color_def = stroke_def.get("color")
+        if color_def:
+            try:
+                # Assuming parse_color is a helper function you have defined elsewhere
+                parsed_c = parse_color(color_def) 
+                if isinstance(parsed_c, QColor):
+                    color = parsed_c
+            except Exception:
+                pass
+
+    # Apply Configuration with explicit Millimeter units
+    hatch_fill.setLineWidth(final_width_mm)
+    hatch_fill.setLineWidthUnit(QgsUnitTypes.RenderMillimeters) # CHANGED from RenderPoints
+    hatch_fill.setColor(color)
+
+    hatch_fill.setDistance(final_spacing_mm)
+    hatch_fill.setDistanceUnit(QgsUnitTypes.RenderMillimeters) # CHANGED from RenderPoints
+    
+    hatch_fill.setOffset(final_offset_mm)
+    hatch_fill.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
+
     return hatch_fill
+
+def _create_gradient_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsGradientFillSymbolLayer]:
+    """
+    Creates a QGIS Gradient Fill layer from a CIMGradientFill definition.
+    """
+    try:
+        gradient_layer = QgsGradientFillSymbolLayer()
+        
+        # Set Coordinate Mode to 'Feature' so it stretches across the polygon
+        gradient_layer.setCoordinateMode(QgsGradientFillSymbolLayer.Feature)
+        gradient_layer.setGradientSpread(QgsGradientFillSymbolLayer.Pad)
+        
+        # 1. Map Gradient Method
+        method = layer_def.get("gradientMethod", "Linear")
+        
+        if method == "Linear":
+            gradient_layer.setGradientType(QgsGradientFillSymbolLayer.Linear)
+            
+            # Initialize standard Left-to-Right vector (0 degrees)
+            gradient_layer.setReferencePoint1(QPointF(0, 0))
+            gradient_layer.setReferencePoint2(QPointF(1, 0))
+            gradient_layer.setReferencePoint1IsCentroid(False)
+            gradient_layer.setReferencePoint2IsCentroid(False)
+            
+            # Add 180 degrees to flip the direction
+            # ArcGIS and QGIS often disagree on whether the angle points 
+            # to the "Start" or the "End" of the gradient.
+            raw_angle = layer_def.get("angle", 0.0)
+            corrected_angle = (raw_angle + 180) % 360
+            gradient_layer.setAngle(corrected_angle)
+
+        elif method in ["Circular", "Radial", "Rectangular", "Buffered"]:
+            gradient_layer.setGradientType(QgsGradientFillSymbolLayer.Radial)
+            gradient_layer.setReferencePoint1(QPointF(0.5, 0.5))
+            gradient_layer.setReferencePoint1IsCentroid(True)
+            gradient_layer.setReferencePoint2(QPointF(1, 0.5))
+            gradient_layer.setReferencePoint2IsCentroid(False)
+            # Radial gradients usually don't need the 180 flip, but if they appear inverted
+            # (inside-out), you might need to swap setColor and setColor2 below.
+        
+        # 2. Handle Colors 
+        color_ramp_def = layer_def.get("colorRamp", {})
+        colors = extract_colors_from_ramp(color_ramp_def)
+        
+        if not colors:
+            colors = [QColor("grey"), QColor("white")]
+
+        if method in ["Circular", "Radial", "Rectangular", "Buffered"]:
+            colors.reverse()
+            
+        if len(colors) == 1:
+            colors.append(colors[0])
+
+        c1 = colors[0]
+        c2 = colors[-1]
+
+        # Create a Ramp Object (This is how 3.4 handles multi-stops)
+        ramp = QgsGradientColorRamp(c1, c2)
+        stops = []
+
+        # --- GAMMA CORRECTION (Manual Midpoint) ---
+        if len(colors) == 2:
+            # RMS average for Linear-like blending (Fixes the "Too Blue" issue)
+            r_mid = int(math.sqrt((c1.red()**2 + c2.red()**2)/2))
+            g_mid = int(math.sqrt((c1.green()**2 + c2.green()**2)/2))
+            b_mid = int(math.sqrt((c1.blue()**2 + c2.blue()**2)/2))
+            a_mid = int((c1.alpha() + c2.alpha())/2)
+            
+            mid_color = QColor(r_mid, g_mid, b_mid, a_mid)
+            stops.append(QgsGradientStop(0.5, mid_color))
+
+        # --- Explicit Stops from JSON ---
+        elif len(colors) > 2:
+            num_intervals = len(colors) - 1
+            for i, color in enumerate(colors):
+                if i == 0 or i == len(colors) - 1:
+                    continue
+                offset = i / num_intervals
+                stops.append(QgsGradientStop(offset, color))
+        
+        # Apply stops to the RAMP, not the layer
+        if stops:
+            ramp.setStops(stops)
+
+        # Tell the layer to use the ColorRamp engine
+        gradient_layer.setGradientColorType(QgsGradientFillSymbolLayer.ColorRamp)
+        gradient_layer.setColorRamp(ramp)
+
+        return gradient_layer
+
+    except Exception as e:
+        logger.error(f"Failed to create gradient fill layer: {e}")
+        return None
 
 
 def _create_point_pattern_fill_layer(layer_def: Dict[str, Any]) -> Optional[QgsPointPatternFillSymbolLayer]:
