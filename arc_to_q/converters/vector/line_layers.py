@@ -154,14 +154,19 @@ def _create_marker_line_layers_from_sub_symbol(sub_symbol: QgsMarkerSymbol, laye
     qgis_layers = []
 
     if "AtRatioPositions" in placement_type:
-        positions = placement.get("positionArray", [0.5])
-        
-        if 0.0 in positions:
+        # (Existing code...)
+        pass
+
+    # NEW BLOCK: Handle Start/End placement
+    elif "AtExtremities" in placement_type:
+        pos = placement.get("extremityPlacement", "Both")
+        if pos == "JustBegin":
             qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.FirstVertex))
-        if 1.0 in positions:
+        elif pos == "JustEnd":
             qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.LastVertex))
-        if 0.5 in positions:
-            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.CentralPoint))
+        elif pos == "Both":
+            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.FirstVertex))
+            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.LastVertex))
 
     elif "AlongLineSameSize" in placement_type:
         marker_layer = _create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.Interval)
