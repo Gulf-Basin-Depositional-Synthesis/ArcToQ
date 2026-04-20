@@ -1,14 +1,11 @@
-"""
-Manual tuning version - allows per-character rotation and offset adjustments
-"""
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from qgis.core import (
     QgsMarkerSymbol, QgsMarkerLineSymbolLayer, QgsSimpleLineSymbolLayer,
-    QgsSymbolLayer, QgsUnitTypes
+    QgsSymbolLayer, QgsUnitTypes, QgsLineSymbol
 )
-from qgis.PyQt.QtCore import Qt, QPointF
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
 from arc_to_q.converters.utils import parse_color
@@ -16,25 +13,14 @@ from .marker_layers import create_font_marker_from_character, create_simple_mark
 
 logger = logging.getLogger(__name__)
 
-# MANUAL TUNING: Adjust these values for specific character codes
-CHAR_ADJUSTMENTS = {
-    40: (0, -3),      # Thrust fault teeth (USGS Font)
-    (35, "ESRI Default Marker"): (0, -2), # Thrust fault triangle (ESRI Default Marker)
-    38: (0, -1.7),    # Strike slip
-    70: (0, -0.25),   # Anticline F
-    77: (0, -0.7),    # Syncline M
-    72: (0, 0),       # Arrowhead H
-    82: (0, -0.5),    # Symbol R
-}
-
+PT_TO_MM = 0.352777778
 
 def create_line_layers_from_def(layer_def: Dict[str, Any]) -> List[QgsSymbolLayer]:
     """Creates one or more QGIS symbol layers from a single ArcGIS symbol layer definition."""
     layer_type = layer_def.get("type")
     
     if layer_type == "CIMSolidStroke":
-        if layer := create_solid_stroke_layer(layer_def):
-            return [layer]
+        return create_solid_stroke_line_layers(layer_def)
     elif layer_type == "CIMCharacterMarker":
         return create_character_marker_line_layers(layer_def)
     elif layer_type == "CIMVectorMarker":
@@ -45,15 +31,50 @@ def create_line_layers_from_def(layer_def: Dict[str, Any]) -> List[QgsSymbolLaye
     return []
 
 
+def create_solid_stroke_line_layers(layer_def: Dict[str, Any]) -> List[QgsSymbolLayer]:
+    """
+    Creates QGIS line symbol layers from a CIMSolidStroke definition.
+    Handles the case where a stroke is used as a 'marker' (e.g., the stem of an arch/flexure).
+    """
+    stroke_layer = create_solid_stroke_layer(layer_def)
+    if not stroke_layer:
+        return []
+
+    # Check if this stroke has a marker placement rule
+    placement = layer_def.get("markerPlacement")
+    if not placement:
+        # Standard continuous line
+        return [stroke_layer]
+    
+    # This stroke is acting as a stamped marker (like a stem)
+    # We must wrap it in a QgsMarkerSymbol and then a QgsMarkerLineSymbolLayer
+    try:
+        sub_symbol = QgsMarkerSymbol()
+        sub_symbol.deleteSymbolLayer(0)
+        
+        # A MarkerSymbol cannot hold a SimpleLineSymbolLayer directly. 
+        # We must create a LineSymbol, put the stroke in it, and then...
+        # Wait, QGIS handles this differently. A stroke marker is just a VectorMarker
+        # in ArcGIS that happens to only contain a stroke.
+        
+        # Let's pass it to the sub-symbol generator
+        return _create_marker_line_layers_from_sub_symbol(sub_symbol, layer_def, inject_stroke=stroke_layer)
+        
+    except Exception as e:
+        logger.error(f"Failed to create placed stroke layer: {e}")
+        return [stroke_layer]
+
+
 def create_solid_stroke_layer(layer_def: Dict[str, Any]) -> Optional[QgsSimpleLineSymbolLayer]:
-    """Creates a QGIS line symbol layer from a CIMSolidStroke definition."""
+    """Creates a base QGIS line symbol layer from a CIMSolidStroke definition."""
     try:
         line_layer = QgsSimpleLineSymbolLayer()
         
         if color := parse_color(layer_def.get("color")):
             line_layer.setColor(color)
-        line_layer.setWidth(layer_def.get("width", 0.5))
-        line_layer.setWidthUnit(QgsUnitTypes.RenderPoints)
+            
+        line_layer.setWidth(layer_def.get("width", 0.5) * PT_TO_MM)
+        line_layer.setWidthUnit(QgsUnitTypes.RenderMillimeters)
         
         cap_map = {"Round": Qt.RoundCap, "Butt": Qt.FlatCap, "Square": Qt.SquareCap}
         join_map = {"Round": Qt.RoundJoin, "Miter": Qt.MiterJoin, "Bevel": Qt.BevelJoin}
@@ -62,12 +83,17 @@ def create_solid_stroke_layer(layer_def: Dict[str, Any]) -> Optional[QgsSimpleLi
 
         for effect in layer_def.get("effects", []):
             if effect.get("type") == "CIMGeometricEffectOffset":
-                line_layer.setOffset(effect.get("offset", 0.0))
-                line_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
+                # Convert points to MM and flip the offset direction to match QGIS coordinates
+                offset_pt = effect.get("offset", 0.0)
+                offset_mm = -offset_pt * PT_TO_MM
+                line_layer.setOffset(offset_mm)
+                line_layer.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
             elif effect.get("type") == "CIMGeometricEffectDashes":
                 if dash_template := effect.get("dashTemplate", []):
-                    line_layer.setCustomDashVector(dash_template)
-                    line_layer.setCustomDashPatternUnit(QgsUnitTypes.RenderPoints)
+                    # Scale dash template to MM
+                    scaled_dash = [d * PT_TO_MM for d in dash_template]
+                    line_layer.setCustomDashVector(scaled_dash)
+                    line_layer.setCustomDashPatternUnit(QgsUnitTypes.RenderMillimeters)
                     line_layer.setUseCustomDashPattern(True)
         return line_layer
     except Exception as e:
@@ -82,25 +108,6 @@ def create_character_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMa
         if not sub_symbol_layer:
             return []
         
-        # Apply manual adjustments based on character code
-        char_code = layer_def.get("characterIndex", 0)
-        font_family = layer_def.get("fontFamilyName", "")
-        
-        rot_adj = 0
-        y_offset_adj = 0
-        
-        if (char_code, font_family) in CHAR_ADJUSTMENTS:
-             rot_adj, y_offset_adj = CHAR_ADJUSTMENTS[(char_code, font_family)]
-        elif char_code in CHAR_ADJUSTMENTS:
-             rot_adj, y_offset_adj = CHAR_ADJUSTMENTS[char_code]
-
-        if rot_adj != 0:
-            sub_symbol_layer.setAngle(sub_symbol_layer.angle() + rot_adj)
-        
-        if y_offset_adj != 0:
-            current_offset = sub_symbol_layer.offset()
-            sub_symbol_layer.setOffset(QPointF(current_offset.x(), current_offset.y() + y_offset_adj))
-        
         marker_symbol = QgsMarkerSymbol([sub_symbol_layer])
         return _create_marker_line_layers_from_sub_symbol(marker_symbol, layer_def)
     except Exception as e:
@@ -108,91 +115,94 @@ def create_character_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMa
         return []
 
 
-def _is_horizontal_vector_tick(layer_def: Dict[str, Any]) -> bool:
-    """Detects if a vector marker is a horizontal line segment rotated 90 degrees (Tick)."""
-    if layer_def.get("type") != "CIMVectorMarker": return False
-    
-    # Check rotation (approx 90)
-    rotation = layer_def.get("rotation", 0)
-    if abs(rotation - 90) > 1e-6: return False
-    
-    # Check geometry path
-    graphics = layer_def.get("markerGraphics", [])
-    if not graphics: return False
-    geo = graphics[0].get("geometry", {})
-    paths = geo.get("paths", [])
-    if not paths or len(paths[0]) != 2: return False
-    
-    p1, p2 = paths[0]
-    # Check if y-coordinates are essentially equal (Horizontal)
-    return abs(p1[1] - p2[1]) < 1e-6
-
-
 def create_vector_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMarkerLineSymbolLayer]:
     """Creates QGIS Marker Line layers from an ArcGIS CIMVectorMarker on a line."""
     try:
         sub_symbol = QgsMarkerSymbol()
         sub_symbol.deleteSymbolLayer(0)
+        
         if sub_layer := create_simple_marker_from_vector(layer_def):
             sub_symbol.appendSymbolLayer(sub_layer)
         else:
             return []
             
-        # Detect if this is a Tick (Limit, Normal Fault) that needs offset inversion
-        invert_offset = _is_horizontal_vector_tick(layer_def)
-        
-        return _create_marker_line_layers_from_sub_symbol(sub_symbol, layer_def, invert_offset=invert_offset)
+        return _create_marker_line_layers_from_sub_symbol(sub_symbol, layer_def)
     except Exception as e:
         logger.error(f"Failed to create vector marker line layers: {e}")
         return []
 
 
-def _create_marker_line_layers_from_sub_symbol(sub_symbol: QgsMarkerSymbol, layer_def: Dict[str, Any], invert_offset: bool = False) -> List[QgsMarkerLineSymbolLayer]:
+def _create_marker_line_layers_from_sub_symbol(
+    sub_symbol: QgsMarkerSymbol, 
+    layer_def: Dict[str, Any],
+    inject_stroke: Optional[QgsSimpleLineSymbolLayer] = None
+) -> List[QgsMarkerLineSymbolLayer]:
     """Creates marker line layers for a given sub-symbol based on placement rules."""
+    
+    # If we are injecting a stroke (like a stem), we need a different approach
+    # QGIS doesn't let us put a LineSymbol inside a MarkerLineSymbol directly easily.
+    # The best way to handle "stems" is to let the main drawing pipeline handle them
+    # as standard lines with dash effects if possible, but if they have strict placements...
+    if inject_stroke:
+        # Fallback: Just return the stroke. It's often better to draw the stem continuously
+        # than to try to stamp it if we lack the exact SVG geometry for it.
+        return [inject_stroke]
+
     placement = layer_def.get("markerPlacement", {})
     placement_type = placement.get("type", "")
     qgis_layers = []
 
     if "AtRatioPositions" in placement_type:
-        # (Existing code...)
         pass
 
-    # NEW BLOCK: Handle Start/End placement
     elif "AtExtremities" in placement_type:
         pos = placement.get("extremityPlacement", "Both")
+        offset_along = placement.get("offsetAlongLine", 0.0) * PT_TO_MM
+
         if pos == "JustBegin":
-            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.FirstVertex))
+            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.FirstVertex, offset_along))
         elif pos == "JustEnd":
-            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.LastVertex))
+            # Invert offset for the end vertex so it pushes inward symmetrically
+            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.LastVertex, -offset_along))
         elif pos == "Both":
-            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.FirstVertex))
-            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.LastVertex))
+            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.FirstVertex, offset_along))
+            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.LastVertex, -offset_along))
 
     elif "AlongLineSameSize" in placement_type:
         marker_layer = _create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.Interval)
         
         template = placement.get("placementTemplate", [10])
         interval = template[0] if template else 10
-        marker_layer.setInterval(interval)
-        marker_layer.setIntervalUnit(QgsUnitTypes.RenderPoints)
+        marker_layer.setInterval(interval * PT_TO_MM)
+        marker_layer.setIntervalUnit(QgsUnitTypes.RenderMillimeters)
         
-        # Apply the perpendicular offset
         if "offset" in placement:
             offset_value = placement.get("offset", 0.0)
-            
-            # FIX: Invert offset for ticks that appear on the wrong side
-            if invert_offset:
-                offset_value = -offset_value
-                
-            marker_layer.setOffset(offset_value)
-            marker_layer.setOffsetUnit(QgsUnitTypes.RenderPoints)
+            marker_layer.setOffset(-offset_value * PT_TO_MM)
+            marker_layer.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
         
-        # Apply offset along the line
         if "offsetAlongLine" in placement:
             offset_along = placement.get("offsetAlongLine", 0.0)
-            marker_layer.setOffsetAlongLine(offset_along)
-            marker_layer.setOffsetAlongLineUnit(QgsUnitTypes.RenderPoints)
+            marker_layer.setOffsetAlongLine(offset_along * PT_TO_MM)
+            marker_layer.setOffsetAlongLineUnit(QgsUnitTypes.RenderMillimeters)
+            
+        # Check endings constraint
+        endings = placement.get("endings", "WithMarkers")
+        if endings == "WithMarkers":
+            # Add explicit markers at the ends if requested
+            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.FirstVertex))
+            qgis_layers.append(_create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.LastVertex))
         
+        qgis_layers.append(marker_layer)
+
+    elif "OnLine" in placement_type:
+        marker_layer = _create_single_marker_line(sub_symbol, layer_def, QgsMarkerLineSymbolLayer.CentralPoint)
+        
+        # Check if it's placed relative to extremities
+        relative_to = placement.get("relativeTo", "LineMiddle")
+        if relative_to == "LineMiddle":
+            pass # Default behavior is fine
+            
         qgis_layers.append(marker_layer)
         
     else:
@@ -201,7 +211,7 @@ def _create_marker_line_layers_from_sub_symbol(sub_symbol: QgsMarkerSymbol, laye
     return qgis_layers
 
 
-def _create_single_marker_line(sub_symbol: QgsMarkerSymbol, layer_def: Dict[str, Any], placement_enum) -> QgsMarkerLineSymbolLayer:
+def _create_single_marker_line(sub_symbol: QgsMarkerSymbol, layer_def: Dict[str, Any], placement_enum, offset_along: float = 0.0) -> QgsMarkerLineSymbolLayer:
     """Helper to create and configure a single QgsMarkerLineSymbolLayer."""
     marker_layer = QgsMarkerLineSymbolLayer()
     marker_layer.setSubSymbol(sub_symbol.clone())
@@ -214,6 +224,10 @@ def _create_single_marker_line(sub_symbol: QgsMarkerSymbol, layer_def: Dict[str,
     
     if placement_rules.get("placePerPart", False):
         marker_layer.setPlaceOnEveryPart(True)
+        
+    if offset_along != 0.0:
+        marker_layer.setOffsetAlongLine(offset_along)
+        marker_layer.setOffsetAlongLineUnit(QgsUnitTypes.RenderMillimeters)
     
     # Handle flipFirst for double-plunge symbols
     if placement_rules.get("flipFirst") and placement_enum == QgsMarkerLineSymbolLayer.FirstVertex:
