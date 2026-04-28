@@ -16,12 +16,19 @@ This project is in its early stages, so don't expect working code of files that 
 - ArcGIS Pro version 3.4 or greater (for arcpy)
 - QGIS version 3.40 or greater (for PyQGIS)
 
-## How To
+## Installation & How To Use
 
-Currently only one file works: our layer converter.
+The easiest way to use ArcToQ is through the native QGIS plugin
 
-To convert layer files, run the layer converter from the QGIS Python environment, e.g., for Windows:
+### 1. Install the Plugin
+1. Download the latest **`ArcToQ.zip`** file from the [Releases page](https://github.com/Gulf-Basin-Depositional-Synthesis/ArcToQ/releases)
+2. Open **QGIS**.
+3. From the top menu, go to **Plugins > Manage and Install Plugins...**
+4. Select the **Install from ZIP** tab on the left panel.
+5. Click the `...` button to browse for the `ArcToQ.zip` file you downloaded, and click **Install Plugin**.
 
-1. Start PowerShell.
-2. cd to the **ArcToQ** folder.
-3. Run your test script, e.g., `& "C:\Program Files\QGIS 3.40.10\bin\python-qgis-ltr.bat" .\tests\tim_test.py`
+### 2. Convert a Layer
+1. Click the new **"Convert LYRX to QLR"** button on your QGIS toolbar (you can also find it under the `Plugins` menu at the top).
+2. A file browser will open. Select the ArcGIS `.lyrx` file you want to convert.
+3. Choose the output directory where you want the new `.qlr` file to be saved.
+4. The converter will run safely in the background. Once finished, a prompt will appear asking if you want to instantly load the converted layer directly into your current active map canvas.
