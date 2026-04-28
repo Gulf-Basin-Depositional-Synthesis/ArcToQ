@@ -11,11 +11,11 @@ from qgis.core import (
     QgsLineSymbol,
     Qgis,
 )
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QPointF
 from qgis.PyQt.QtGui import QColor
 
 from arc_to_q.converters.utils import parse_color
-from .marker_layers import create_font_marker_from_character, create_simple_marker_from_vector
+from .marker_layers import create_font_marker_from_character, create_simple_marker_from_vector, _get_effective_props
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +35,166 @@ def _get_placement_enum(name: str):
         return getattr(qgis.core.Qgis.MarkerLinePlacement, name)
     return getattr(QgsMarkerLineSymbolLayer, name)
 
+def _create_grouped_vector_marker_line(
+    layer_defs: List[Dict[str, Any]],
+) -> List[QgsMarkerLineSymbolLayer]:
+    """
+    Combines multiple CIMVectorMarkers that share the same placement into a
+    single QgsMarkerLineSymbolLayer with a multi-layer QgsMarkerSymbol.
+    This keeps composite markers (stem + arrowhead, paired ticks, etc.)
+    in phase along the line.
+
+    For AlongLine placements, CIM offsetY is a perpendicular offset from the
+    line and must be promoted to the QgsMarkerLineSymbolLayer rather than baked
+    into each sub-symbol, so that all sub-layers shift together.  offsetX is an
+    along-line nudge and is kept as a per-sub-layer local offset.
+    """
+    try:
+        sub_symbol = QgsMarkerSymbol()
+        sub_symbol.deleteSymbolLayer(0)
+
+        placement_type = layer_defs[0].get("markerPlacement", {}).get("type", "")
+        is_along_line = "AlongLine" in placement_type
+
+        # For AlongLine placements, collect the perpendicular (Y) offsets from
+        # all grouped layers.  We use the average so that a tick+arrow pair
+        # (e.g. offsetY 1 and offsetY -4) sit symmetrically about the line.
+        perp_offsets_pt: List[float] = []
+
+        for layer_def in layer_defs:
+            sub_layer = create_simple_marker_from_vector(layer_def, bake_offset=False)
+            if sub_layer is None:
+                continue
+
+            props = _get_effective_props(layer_def)
+            offset_x_pt = props.get("offsetX", 0.0)
+            offset_y_pt = props.get("offsetY", 0.0)
+
+            if is_along_line:
+                # offsetY → perpendicular; promote to marker-line level (handled below)
+                perp_offsets_pt.append(offset_y_pt)
+                # offsetX → along-line nudge; keep as local sub-layer offset
+                if offset_x_pt != 0.0:
+                    sub_layer.setOffset(QPointF(offset_x_pt * PT_TO_MM, 0.0))
+                    sub_layer.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
+            else:
+                if offset_x_pt != 0.0 or offset_y_pt != 0.0:
+                    sub_layer.setOffset(QPointF(offset_x_pt * PT_TO_MM, -offset_y_pt * PT_TO_MM))
+                    sub_layer.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
+
+            sub_symbol.appendSymbolLayer(sub_layer)
+
+        if sub_symbol.symbolLayerCount() == 0:
+            return []
+
+        # All layer_defs in the group share the same placement — use the first.
+        qgis_layers = _create_marker_line_layers_from_sub_symbol(sub_symbol, layer_defs[0])
+
+        # Apply the averaged perpendicular offset at the marker-line level.
+        if is_along_line and perp_offsets_pt:
+            avg_perp_mm = (sum(perp_offsets_pt) / len(perp_offsets_pt)) * PT_TO_MM
+            for ml in qgis_layers:
+                ml.setOffset(avg_perp_mm)
+                ml.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
+
+        return qgis_layers
+    except Exception as e:
+        logger.error(f"Failed to create grouped vector marker line: {e}")
+        return []
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
+def create_line_layers_from_symbol_layers(symbol_layers: List[Dict[str, Any]]) -> List[QgsSymbolLayer]:
+    """
+    Entry point that processes the full CIMLineSymbol.symbolLayers list.
+    Groups CIMVectorMarkers sharing identical placement specs into single
+    QgsMarkerLineSymbolLayers so that composite markers (e.g. stem + arrowhead)
+    stay in phase along the line.  Non-vector-marker layers are passed through
+    individually.
+    """
+    result: List[QgsSymbolLayer] = []
+    pending_vector_markers: List[Dict[str, Any]] = []
+
+    def _flush_group():
+        if not pending_vector_markers:
+            return
+        if len(pending_vector_markers) == 1:
+            result.extend(create_line_layers_from_def(pending_vector_markers))
+        else:
+            result.extend(_create_grouped_vector_marker_line(pending_vector_markers))
+        pending_vector_markers.clear()
+
+    def _placement_key(layer_def: Dict[str, Any]):
+        p = layer_def.get("markerPlacement", {})
+        return (
+            p.get("type", ""),
+            tuple(p.get("placementTemplate", [])),
+            p.get("endings", ""),
+            p.get("offset", 0.0),
+            p.get("offsetAlongLine", 0.0),
+            p.get("extremityPlacement", ""),
+            p.get("relativeTo", ""),
+        )
+
+    prev_key = None
+    for layer_def in symbol_layers:
+        if layer_def.get("type") != "CIMVectorMarker":
+            _flush_group()
+            result.extend(create_line_layers_from_def(layer_def))
+            prev_key = None
+            continue
+
+        key = _placement_key(layer_def)
+        if key != prev_key and pending_vector_markers:
+            _flush_group()
+        pending_vector_markers.append(layer_def)
+        prev_key = key
+
+    _flush_group()
+    return result
+
+def create_vector_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMarkerLineSymbolLayer]:
+    """Creates QGIS Marker Line layers from an ArcGIS CIMVectorMarker on a line."""
+    try:
+        sub_symbol = QgsMarkerSymbol()
+        sub_symbol.deleteSymbolLayer(0)
+
+        sub_layer = create_simple_marker_from_vector(layer_def, bake_offset=False)
+        if not sub_layer:
+            return []
+
+        props = _get_effective_props(layer_def)
+        offset_x_pt = props.get("offsetX", 0.0)
+        offset_y_pt = props.get("offsetY", 0.0)
+
+        placement_type = layer_def.get("markerPlacement", {}).get("type", "")
+        is_along_line = "AlongLine" in placement_type
+
+        if is_along_line:
+            # offsetY is perpendicular to the line — promote to marker-line level.
+            # offsetX is an along-line nudge — keep as local sub-layer offset.
+            if offset_x_pt != 0.0:
+                sub_layer.setOffset(QPointF(offset_x_pt * PT_TO_MM, 0.0))
+                sub_layer.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
+        else:
+            if offset_x_pt != 0.0 or offset_y_pt != 0.0:
+                sub_layer.setOffset(QPointF(offset_x_pt * PT_TO_MM, -offset_y_pt * PT_TO_MM))
+                sub_layer.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
+
+        sub_symbol.appendSymbolLayer(sub_layer)
+        qgis_layers = _create_marker_line_layers_from_sub_symbol(sub_symbol, layer_def)
+
+        if is_along_line and offset_y_pt != 0.0:
+            for ml in qgis_layers:
+                ml.setOffset(offset_y_pt * PT_TO_MM)
+                ml.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
+
+        return qgis_layers
+    except Exception as e:
+        logger.error(f"Failed to create vector marker line layers: {e}")
+        return []
 
 def create_line_layers_from_def(layer_def: Dict[str, Any]) -> List[QgsSymbolLayer]:
     """Creates one or more QGIS symbol layers from a single ArcGIS symbol layer definition."""
@@ -63,12 +219,6 @@ def create_line_layers_from_def(layer_def: Dict[str, Any]) -> List[QgsSymbolLaye
 def create_solid_stroke_line_layers(layer_def: Dict[str, Any]) -> List[QgsSymbolLayer]:
     """
     Creates QGIS line symbol layers from a CIMSolidStroke definition.
-
-    If the stroke carries a markerPlacement rule (e.g. a stem/arch), the stroke
-    is treated as a stamped marker.  Because QGIS cannot place a
-    QgsSimpleLineSymbolLayer inside a QgsMarkerLineSymbolLayer directly, we fall
-    back to drawing it as a continuous line — this is visually acceptable for
-    straight stems and avoids a QGIS API mismatch.
     """
     stroke_layer = create_solid_stroke_layer(layer_def)
     if not stroke_layer:
@@ -76,12 +226,8 @@ def create_solid_stroke_line_layers(layer_def: Dict[str, Any]) -> List[QgsSymbol
 
     placement = layer_def.get("markerPlacement")
     if not placement:
-        # Standard continuous line — most common case
         return [stroke_layer]
 
-    # Placed stroke (stem): return as a continuous line.
-    # A true stamped-stroke would require an SVG round-trip; the continuous
-    # line is a reasonable approximation and avoids broken symbol trees.
     return [stroke_layer]
 
 
@@ -140,27 +286,6 @@ def create_character_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMa
 
 
 # ---------------------------------------------------------------------------
-# Vector marker on a line
-# ---------------------------------------------------------------------------
-
-def create_vector_marker_line_layers(layer_def: Dict[str, Any]) -> List[QgsMarkerLineSymbolLayer]:
-    """Creates QGIS Marker Line layers from an ArcGIS CIMVectorMarker on a line."""
-    try:
-        sub_symbol = QgsMarkerSymbol()
-        sub_symbol.deleteSymbolLayer(0)
-
-        if sub_layer := create_simple_marker_from_vector(layer_def):
-            sub_symbol.appendSymbolLayer(sub_layer)
-        else:
-            return []
-
-        return _create_marker_line_layers_from_sub_symbol(sub_symbol, layer_def)
-    except Exception as e:
-        logger.error(f"Failed to create vector marker line layers: {e}")
-        return []
-
-
-# ---------------------------------------------------------------------------
 # Placement routing
 # ---------------------------------------------------------------------------
 
@@ -178,7 +303,6 @@ def _create_marker_line_layers_from_sub_symbol(
 
     if "AtExtremities" in placement_type:
         pos = placement.get("extremityPlacement", "Both")
-        # offsetAlongLine is in points; convert to mm
         offset_along = placement.get("offsetAlongLine", 0.0)
 
         if pos in ("JustBegin", "Both"):
@@ -200,30 +324,33 @@ def _create_marker_line_layers_from_sub_symbol(
             sub_symbol, layer_def, _get_placement_enum("Interval")
         )
 
-        template = placement.get("placementTemplate", [10])
-        interval = template[0] if template else 10
+        template = placement.get("placementTemplate")
+        if isinstance(template, list):
+            interval = template[0] if template else 10
+        elif isinstance(template, (int, float)):
+            interval = template
+        else:
+            interval = 10
         marker_layer.setInterval(interval * PT_TO_MM)
         marker_layer.setIntervalUnit(QgsUnitTypes.RenderMillimeters)
 
         if "offset" in placement:
-            # Perpendicular offset — restore original sign (no inversion needed here)
-            marker_layer.setOffset(placement["offset"] * PT_TO_MM)
+            # Perpendicular offset: ArcGIS positive = left-of-line, QGIS positive = right-of-line.
+            # Negate to preserve the intended side.
+            marker_layer.setOffset(-placement["offset"] * PT_TO_MM)
             marker_layer.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
 
         if "offsetAlongLine" in placement:
             marker_layer.setOffsetAlongLine(placement["offsetAlongLine"] * PT_TO_MM)
             marker_layer.setOffsetAlongLineUnit(QgsUnitTypes.RenderMillimeters)
 
+        # CIM endings="WithMarkers" means the interval pattern starts and ends with a
+        # marker (i.e. the first/last placements are included in the interval cadence).
+        # QGIS QgsMarkerLineSymbolLayer Interval placement already renders at the
+        # endpoints when the interval divides evenly, so adding extra FirstVertex /
+        # LastVertex layers produces duplicates at the ends.  Do NOT emit extra
+        # endpoint layers here.
         qgis_layers.append(marker_layer)
-
-        # Force markers at endpoints for symbols like flexures / escarpments
-        if placement.get("endings") == "WithMarkers":
-            qgis_layers.append(
-                _create_single_marker_line(sub_symbol, layer_def, _get_placement_enum("FirstVertex"))
-            )
-            qgis_layers.append(
-                _create_single_marker_line(sub_symbol, layer_def, _get_placement_enum("LastVertex"))
-            )
 
     elif "OnLine" in placement_type:
         offset_along = placement.get("startPointOffset", 0.0)
@@ -250,8 +377,6 @@ def _create_single_marker_line(
 ) -> QgsMarkerLineSymbolLayer:
     """
     Creates and configures a single QgsMarkerLineSymbolLayer.
-
-    offset_along is expected in ArcGIS points; it is converted to mm here.
     """
     marker_layer = QgsMarkerLineSymbolLayer()
     marker_layer.setSubSymbol(sub_symbol.clone())
@@ -259,12 +384,12 @@ def _create_single_marker_line(
 
     placement_rules = layer_def.get("markerPlacement", {})
 
-    # Tangent rotation: marker follows the line direction
-    if placement_rules.get("angleToLine", False):
-        if hasattr(marker_layer, "setRotateMarker"):
-            marker_layer.setRotateMarker(True)
-        elif hasattr(marker_layer, "setRotateSymbols"):
-            marker_layer.setRotateSymbols(True)
+    # Tangent rotation: marker follows the line direction. Defaults to True for marker lines.
+    rotate_marker = placement_rules.get("angleToLine", True)
+    if hasattr(marker_layer, "setRotateMarker"):
+        marker_layer.setRotateMarker(rotate_marker)
+    elif hasattr(marker_layer, "setRotateSymbols"):
+        marker_layer.setRotateSymbols(rotate_marker)
 
     if placement_rules.get("placePerPart", False):
         if hasattr(marker_layer, "setPlaceOnEveryPart"):

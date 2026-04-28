@@ -250,6 +250,7 @@ def create_simple_marker_from_vector(
     symbol_def: Dict[str, Any],
     baked_svg_path: Optional[str] = None,
     angle_to_line: Optional[bool] = None,
+    bake_offset: bool = True,
 ) -> QgsSymbolLayer:
     """
     Builds a fully-baked QGIS SVG marker layer from a CIM vector marker.
@@ -310,14 +311,11 @@ def create_simple_marker_from_vector(
     has_geometry = "rings" in geometry or ("paths" in geometry and not is_simple_native_line)
     if has_geometry and not primitive_name:
         svg_b64, vb_size = bake_geometry_to_svg(
-            geometry,
-            frame,
-            base_size_pt,
-            props["anchorPoint"],
-            props["anchorPointUnits"],
+            geometry, frame, base_size_pt,
+            props["anchorPoint"], props["anchorPointUnits"],
             rotation,
-            props["offsetX"],
-            props["offsetY"],
+            props["offsetX"] if bake_offset else 0.0,
+            props["offsetY"] if bake_offset else 0.0,
             main_color.name(),
             stroke_color.name(),
             stroke_width,
@@ -365,12 +363,21 @@ def create_simple_marker_from_vector(
     fallback.setSize(base_size_pt * PT_TO_MM)
     fallback.setSizeUnit(QgsUnitTypes.RenderMillimeters)
 
-    # For the fallback we do apply offset/rotation via layer properties (no tangent
-    # interaction because these are simple axis-aligned shapes)
-    off_x_mm = props["offsetX"] * PT_TO_MM
-    off_y_mm = -props["offsetY"] * PT_TO_MM
+    # For angleToLine markers, do NOT apply offsetY/offsetX on the sub-symbol.
+    # When QgsMarkerLineSymbolLayer rotates the sub-symbol to follow the line
+    # tangent, the sub-symbol's local Y axis aligns WITH the line, so a
+    # sub-symbol offsetY would shift the marker along the line instead of
+    # across it. The perpendicular offset is applied at the marker-line level
+    # instead, in _create_single_marker_line().
     fallback.setAngle(-rotation)
-    fallback.setOffset(QPointF(off_x_mm, off_y_mm))
+    if bake_offset and not props.get("angleToLine"):
+        # Freestanding point marker — apply offset directly on the sub-layer.
+        off_x_mm = props["offsetX"] * PT_TO_MM
+        off_y_mm = -props["offsetY"] * PT_TO_MM
+        fallback.setOffset(QPointF(off_x_mm, off_y_mm))
+    else:
+        # Line marker context: caller will set offset on the sub-layer.
+        fallback.setOffset(QPointF(0.0, 0.0))
     fallback.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
 
     return fallback

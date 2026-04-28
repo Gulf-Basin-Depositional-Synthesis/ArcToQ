@@ -1,0 +1,10 @@
+[general]
+name=ArcToQ Converter
+qgisMinimumVersion=3.0
+description=Converts ArcGIS Pro .lyrx files to QGIS .qlr files directly from the toolbar.
+version=1.0
+author=GBDS
+email=GBDS@ig.utexas.edu
+about=A simple wrapper to run the ArcToQ converter natively inside QGIS.
+repository=https://github.com/Gulf-Basin-Depositional-Synthesis/ArcToQ
+tracker=https://github.com/Gulf-Basin-Depositional-Synthesis/ArcToQ
