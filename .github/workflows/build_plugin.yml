@@ -1,0 +1,37 @@
+name: Build QGIS Plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create release zip
+        run: |
+          # Create the exact folder structure QGIS expects
+          mkdir ArcToQ
+          
+          # Copy only the necessary files and directories
+          cp -r arc_to_q ArcToQ/
+          cp __init__.py ArcToQ/
+          cp arctoq_plugin.py ArcToQ/
+          cp metadata.txt ArcToQ/
+          cp icon.png ArcToQ/
+          cp README.md ArcToQ/
+          cp LICENSE ArcToQ/
+          
+          # Zip it all up
+          zip -r ArcToQ.zip ArcToQ/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArcToQ-Plugin
+          path: ArcToQ.zip
