@@ -1,6 +1,7 @@
 import sys
 import os
 from qgis.PyQt.QtWidgets import QAction, QFileDialog, QMessageBox
+from qgis.PyQt.QtGui import QIcon  
 from qgis.core import QgsApplication, QgsProject, QgsLayerDefinition
 
 # Dynamically add the plugin folder to the Python path so the 
@@ -18,8 +19,12 @@ class ArcToQPlugin:
         self.action = None
 
     def initGui(self):
-        # Create the action (button)
-        self.action = QAction("Convert LYRX to QLR", self.iface.mainWindow())
+        # 1. Define the path to your new icon
+        icon_path = os.path.join(self.plugin_dir, "icon.png")
+        
+        # 2. Pass the QIcon to the QAction
+        self.action = QAction(QIcon(icon_path), "Convert LYRX to QLR", self.iface.mainWindow())
+        
         self.action.setObjectName("ArcToQAction")
         self.action.setToolTip("Select an ArcGIS .lyrx file to convert")
         
