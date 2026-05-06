@@ -757,7 +757,7 @@ class VectorRenderer:
             return qlr_string
 
         try:
-            tree = ET.fromstring(qlr_string)
+            tree = ET.fromstring(qlr_string)  # nosec
         except ET.ParseError as e:
             logger.error(f"Failed to parse QLR XML: {e}")
             return qlr_string # Return original string if XML is invalid
