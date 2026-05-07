@@ -9,6 +9,7 @@ This project is in its early stages, so don't expect working code of files that 
 ## Features
 
 - Convert ArcGIS Pro layer files (LYRX) to QGIS layer files (QLR)
+- You can request additional features in the [Issues tab](https://github.com/Gulf-Basin-Depositional-Synthesis/ArcToQ/issues)
 
 ## Requirements
 
@@ -18,7 +19,7 @@ This project is in its early stages, so don't expect working code of files that 
 
 You can either use the native QGIS plugin or run the layer converter from the QGIS Python environment
 
-## QGIS Plugin
+## **QGIS Plugin**
 
 ### 1. Install the Plugin
 1. Download the latest **`ArcToQ.zip`** file from the [Releases page](https://github.com/Gulf-Basin-Depositional-Synthesis/ArcToQ/releases)
@@ -33,7 +34,7 @@ You can either use the native QGIS plugin or run the layer converter from the QG
 3. Choose the output directory where you want the new `.qlr` file to be saved.
 4. The converter will run safely in the background. Once finished, a prompt will appear asking if you want to instantly load the converted layer directly into your current active map canvas.
 
-## QGIS Python Environment
+## **QGIS Python Environment**
 
 In this example, for Windows:
 
