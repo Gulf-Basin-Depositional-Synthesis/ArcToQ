@@ -405,25 +405,24 @@ class VectorRenderer:
             renderer.setWeightExpression(f'"{weight_field}"')
             logger.info(f"Set heatmap weight field to: {weight_field}")
 
-        # 3. Parse the color ramp (Simplified for older QGIS versions)
-        arc_color_scheme = renderer_def.get("colorScheme")
-        if arc_color_scheme and arc_color_scheme.get("colorRamps"):
-            color_ramp_segments = arc_color_scheme["colorRamps"]
+        # Parse the color ramp fully
+        arc_color_scheme = renderer_def.get("colorScheme", {})
+        # Assuming you import extract_colors_from_ramp at the top of vector_renderer.py
+        colors = extract_colors_from_ramp(arc_color_scheme)
+        
+        if len(colors) >= 2:
+            gradient_ramp = QgsGradientColorRamp(colors[0], colors[-1])
             
-            if color_ramp_segments:
-                # Get the very first "from" color of the entire ramp
-                start_color_def = color_ramp_segments[0].get("fromColor")
-                start_color = parse_color(start_color_def)
+            # Add intermediate stops for complex heatmaps
+            if len(colors) > 2:
+                stops = []
+                for i in range(1, len(colors) - 1):
+                    position = i / (len(colors) - 1)
+                    stops.append(QgsGradientStop(position, colors[i]))
+                gradient_ramp.setStops(stops)
                 
-                # Get the very last "to" color of the entire ramp
-                end_color_def = color_ramp_segments[-1].get("toColor")
-                end_color = parse_color(end_color_def)
-
-                if start_color and end_color:
-                    # Create a simple two-color gradient ramp
-                    gradient_ramp = QgsGradientColorRamp(start_color, end_color)
-                    renderer.setColorRamp(gradient_ramp)
-                    logger.info("Created a simplified two-color gradient ramp (multi-stop not supported in this QGIS version).")
+            renderer.setColorRamp(gradient_ramp)
+            logger.info("Successfully applied full multi-stop gradient ramp to Heatmap.")
 
         # 4. Set render quality to maximum
         quality = renderer_def.get("rendererQuality", 4)

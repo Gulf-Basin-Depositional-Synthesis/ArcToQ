@@ -19,7 +19,7 @@ from arc_to_q.converters.lyrx_converter import convert_lyrx
 
 if __name__ == "__main__":
     output_folder = 'G:/Projects/QGIS Support/test_results'
-    in_lyrx = "G:/Working/Students/Undergraduate/For_Vince/ArcGIS_AddOn/ArcGISPaleo_AddOn/dummy.lyrx"
+    in_lyrx = "G:/Working/Students/Undergraduate/For_Vince/ArcGIS_AddOn/ArcGISPaleo_AddOn/heatmaptest.lyrx"
 
     qgs = QgsApplication([], False)
     qgs.initQgis()
