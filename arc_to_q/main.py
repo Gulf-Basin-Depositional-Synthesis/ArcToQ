@@ -7,14 +7,29 @@ import argparse
 # Ensure the parent directory is in the path so arc_to_q imports work
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-def find_qgis_python_bat():
-    """Attempt to find the QGIS python executable on Windows."""
-    search_paths = [
-        r"C:\Program Files\QGIS *\bin\python-qgis-ltr.bat",
-        r"C:\Program Files\QGIS *\bin\python-qgis.bat",
-        r"C:\OSGeo4W64\bin\python-qgis-ltr.bat",
-        r"C:\OSGeo4W64\bin\python-qgis.bat",
-    ]
+def find_qgis_python_exec():
+    """Attempt to find the QGIS python executable across different OS."""
+    search_paths = []
+    
+    if sys.platform == "darwin":
+        # macOS paths
+        search_paths = [
+            "/Applications/QGIS*.app/Contents/MacOS/bin/python3",
+            "/Applications/QGIS*.app/Contents/MacOS/python",
+        ]
+    elif sys.platform.startswith("linux"):
+        # Linux paths - often just the system python3 if qgis is installed system-wide
+        search_paths = [
+            "/usr/bin/python3",
+        ]
+    else:
+        # Windows paths
+        search_paths = [
+            r"C:\Program Files\QGIS *\bin\python-qgis-ltr.bat",
+            r"C:\Program Files\QGIS *\bin\python-qgis.bat",
+            r"C:\OSGeo4W64\bin\python-qgis-ltr.bat",
+            r"C:\OSGeo4W64\bin\python-qgis.bat",
+        ]
     
     for pattern in search_paths:
         matches = glob.glob(pattern)
@@ -63,21 +78,21 @@ def main():
             sys.exit(1)
 
         print("QGIS environment not detected. Searching for QGIS installation...")
-        qgis_bat = find_qgis_python_bat()
+        qgis_exec = find_qgis_python_exec()
         
-        if not qgis_bat:
-            print("ERROR: Could not find QGIS installation. Please run this script from the OSGeo4W shell.")
+        if not qgis_exec:
+            print("ERROR: Could not find QGIS installation. Please run this script from the OSGeo4W shell or equivalent QGIS environment.")
             sys.exit(1)
             
-        print(f"Found QGIS at: {qgis_bat}")
+        print(f"Found QGIS at: {qgis_exec}")
         print("Relaunching script in QGIS environment...\n" + "-"*40)
         
         # Set an environment variable to prevent looping
         env = os.environ.copy()
         env["ARCTOQ_RELAUNCHED"] = "1"
         
-        # Relaunch THIS script using the QGIS bat file
-        cmd = [qgis_bat, __file__, input_path]
+        # Relaunch THIS script using the QGIS executable
+        cmd = [qgis_exec, __file__, input_path]
         if output_path:
             cmd.extend(["-o", output_path])
             

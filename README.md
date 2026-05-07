@@ -29,7 +29,7 @@ You can either use the native QGIS plugin or run the layer converter from the QG
 5. Click the `...` button to browse for the `ArcToQ.zip` file you downloaded, and click **Install Plugin**.
 
 ### 2. Convert a Layer
-1. Click the new **"Convert LYRX to QLR"** button on your QGIS toolbar (you can also find it under the `Plugins` menu at the top).
+1. Click the new <img src="icon.png" width="30" height="30"> button on your QGIS toolbar (you can also find it under the `Plugins` menu at the top).
 2. A file browser will open. Select the ArcGIS `.lyrx` file you want to convert.
 3. Choose the output directory where you want the new `.qlr` file to be saved.
 4. The converter will run safely in the background. Once finished, a prompt will appear asking if you want to instantly load the converted layer directly into your current active map canvas.
