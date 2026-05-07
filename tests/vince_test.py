@@ -2,6 +2,8 @@
     PowerShell
     CD to ArcToQ folder
     & "C:\Program Files\QGIS 3.40.10\bin\python-qgis-ltr.bat" .\tests\vince_test.py
+
+    & "C:\Program Files\QGIS 3.44.6\bin\python-qgis.bat" .\tests\vince_test.py
 """
 
 import sys

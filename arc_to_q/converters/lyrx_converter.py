@@ -681,7 +681,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
         qgs = QgsApplication([], False)
         qgs.initQgis()
 
-    project = QgsProject.instance()
+    project = QgsProject()
 
     try:
         lyrx = _open_lyrx(in_lyrx)
@@ -705,7 +705,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             _set_layer_transparency(out_layer, layer_def)
 
             # Add to root tree manually (since we removed it from _convert_feature_layer)
-            root = QgsProject.instance().layerTreeRoot()
+            root = project.layerTreeRoot()
             node = root.addLayer(out_layer)
             if node:
                 if 'visibility' in layer_def:
@@ -724,7 +724,7 @@ def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
             _set_scale_visibility(out_layer, layer_def)
             _set_layer_transparency(out_layer, layer_def)
             
-            root = QgsProject.instance().layerTreeRoot()
+            root = project.layerTreeRoot()
             node = root.addLayer(out_layer)
             
             if node:
