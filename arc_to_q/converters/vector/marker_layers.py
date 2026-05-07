@@ -48,18 +48,14 @@ def bake_geometry_to_svg(
     rotation: float,
     offset_x_pt: float,
     offset_y_pt: float,
-    color_hex: str,
-    stroke_color_hex: str,
+    fill_color: QColor,
+    stroke_color: QColor,
     stroke_width: float,
     is_line: bool
 ) -> Tuple[Optional[str], float]:
     """
     Bakes ArcGIS anchor, scale, rotation, and offset directly into the SVG coordinates.
     Creates a symmetrical ViewBox so QGIS places (0,0) exactly on the line.
-
-    All transformations (anchor shift, scale, rotation, offset) are applied here so
-    that QGIS receives a pre-transformed SVG and does not need separate offset/angle
-    properties — which would break for angled/tangent markers on lines.
     """
     if not geometry:
         return None, 0.0
@@ -85,14 +81,13 @@ def bake_geometry_to_svg(
 
     # 3. Resolve Anchor Point in absolute ArcGIS frame coordinates
     if anchor_units == "Relative":
-        # Relative (0,0) is the centre of the frame; (±0.5, ±0.5) are the edges
         anchor_x = ((xmin + xmax) / 2.0) + (anchor.get("x", 0.0) * width)
         anchor_y = ((ymin + ymax) / 2.0) + (anchor.get("y", 0.0) * height)
     else:
         anchor_x = anchor.get("x", 0.0)
         anchor_y = anchor.get("y", 0.0)
 
-    # 4. Transform every point: anchor → scale → rotate → offset → flip-Y for SVG
+    # 4. Transform every point
     transformed_shapes = []
     all_x, all_y = [], []
 
@@ -105,23 +100,18 @@ def bake_geometry_to_svg(
         for pt in shape:
             x, y = pt[0], pt[1]
 
-            # Shift geometry so the anchor point sits at the origin
             x_anch = x - anchor_x
             y_anch = y - anchor_y
 
-            # Scale to the desired point size
             x_sc = x_anch * scale
             y_sc = y_anch * scale
 
-            # Rotate — ArcGIS defines positive rotation as counter-clockwise
             x_rot = (x_sc * cos_r) - (y_sc * sin_r)
             y_rot = (x_sc * sin_r) + (y_sc * cos_r)
 
-            # Apply visual offsets (already in point units after scaling)
             x_fin = x_rot + offset_x_pt
             y_fin = y_rot + offset_y_pt
 
-            # Flip Y axis: SVG increases downward, ArcGIS increases upward
             svg_x = x_fin
             svg_y = -y_fin
 
@@ -134,11 +124,10 @@ def bake_geometry_to_svg(
     if not all_x:
         return None, 0.0
 
-    # 5. Symmetric ViewBox — keeps the rendered origin at (0,0) so QGIS centres correctly
+    # 5. Symmetric ViewBox
     max_abs_x = max(abs(x) for x in all_x)
     max_abs_y = max(abs(y) for y in all_y)
 
-    # Padding prevents thick strokes from being clipped at the viewbox edge
     padding = (stroke_width * scale) + 1.0
     limit = max(max_abs_x, max_abs_y) + padding
     limit = max(limit, 2.0)
@@ -159,18 +148,23 @@ def bake_geometry_to_svg(
 
     path_str = " ".join(path_parts)
 
-    if is_line:
-        fill_str = "none"
-        stroke_str = color_hex
-    else:
-        fill_str = color_hex
-        stroke_str = stroke_color_hex if stroke_width > 0 else "none"
+    # 7. Embed the QGIS Alpha/Opacity Dynamic Parameters
+    fill_hex = fill_color.name()
+    fill_opacity = fill_color.alphaF()
+    stroke_hex = stroke_color.name()
+    stroke_opacity = stroke_color.alphaF()
 
-    style = (
-        f'fill="param(fill) {fill_str}" '
-        f'stroke="param(outline) {stroke_str}" '
-        f'stroke-width="param(outline-width) 1.0"'
-    )
+    if is_line:
+        fill_style = 'fill="none"'
+        stroke_style = f'stroke="param(outline) {stroke_hex}" stroke-opacity="param(outline-opacity) {stroke_opacity:.3f}"'
+    else:
+        fill_style = f'fill="param(fill) {fill_hex}" fill-opacity="param(fill-opacity) {fill_opacity:.3f}"'
+        if stroke_width > 0:
+            stroke_style = f'stroke="param(outline) {stroke_hex}" stroke-opacity="param(outline-opacity) {stroke_opacity:.3f}"'
+        else:
+            stroke_style = 'stroke="none"'
+
+    style = f'{fill_style} {stroke_style} stroke-width="param(outline-width) 1.0"'
 
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
@@ -180,7 +174,6 @@ def bake_geometry_to_svg(
     )
 
     return base64.b64encode(svg.encode("utf-8")).decode("utf-8"), vb_size
-
 
 def _get_effective_props(layer_def: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -252,27 +245,16 @@ def create_simple_marker_from_vector(
     angle_to_line: Optional[bool] = None,
     bake_offset: bool = True,
 ) -> QgsSymbolLayer:
-    """
-    Builds a fully-baked QGIS SVG marker layer from a CIM vector marker.
-
-    All anchor, scale, rotation, and offset transforms are baked directly into the
-    SVG so that QGIS receives a pre-transformed glyph centred on (0,0).  This is
-    the only approach that produces correct offsets when a marker is placed along a
-    line (tangent tracking), because applying offset/angle in QGIS layer properties
-    interacts incorrectly with the marker line's own rotation.
-    """
-    # 1. Collect effective transform properties from the CIM hierarchy
+    """Builds a fully-baked QGIS SVG marker layer from a CIM vector marker."""
     props = _get_effective_props(symbol_def)
     base_size_pt = symbol_def.get("size", 6.0)
 
-    # 2. Locate the layer that actually holds geometry
     deepest_layer = _get_deepest_layer_def(symbol_def) or symbol_def
     graphics = deepest_layer.get("markerGraphics", [])
     geometry = graphics[0].get("geometry", {}) if graphics else {}
     primitive_name = graphics[0].get("primitiveName") if graphics else None
     frame = deepest_layer.get("frame", {"xmin": -5.0, "ymin": -5.0, "xmax": 5.0, "ymax": 5.0})
 
-    # 3. Extract fill/stroke colours
     fill_color = QColor("black")
     stroke_color = QColor("black")
     stroke_width = 0.0
@@ -291,23 +273,20 @@ def create_simple_marker_from_vector(
     is_line = "paths" in geometry
     main_color = stroke_color if is_line else fill_color
 
-    # 4. Detect simple axis-aligned lines and route them to the native Line primitive
-    #    to avoid SVG viewbox clipping artefacts on single-segment stems.
     is_simple_native_line = False
     rotation = props["rotation"]
     if is_line:
         paths = geometry.get("paths", [])
         if len(paths) == 1 and len(paths[0]) == 2:
             pt1, pt2 = paths[0][0], paths[0][1]
-            if abs(pt1[0] - pt2[0]) < 0.01:      # purely vertical
+            if abs(pt1[0] - pt2[0]) < 0.01:
                 is_simple_native_line = True
                 primitive_name = "Line"
-            elif abs(pt1[1] - pt2[1]) < 0.01:    # purely horizontal → rotate 90°
+            elif abs(pt1[1] - pt2[1]) < 0.01:
                 is_simple_native_line = True
                 primitive_name = "Line"
                 rotation += 90
 
-    # 5. Complex geometries: bake everything into SVG
     has_geometry = "rings" in geometry or ("paths" in geometry and not is_simple_native_line)
     if has_geometry and not primitive_name:
         svg_b64, vb_size = bake_geometry_to_svg(
@@ -316,8 +295,8 @@ def create_simple_marker_from_vector(
             rotation,
             props["offsetX"] if bake_offset else 0.0,
             props["offsetY"] if bake_offset else 0.0,
-            main_color.name(),
-            stroke_color.name(),
+            main_color,     # Pass QColor directly
+            stroke_color,   # Pass QColor directly
             stroke_width,
             is_line,
         )
@@ -336,7 +315,6 @@ def create_simple_marker_from_vector(
                 marker_layer.setStrokeWidth(stroke_width * PT_TO_MM)
                 marker_layer.setStrokeWidthUnit(QgsUnitTypes.RenderMillimeters)
 
-            # All transforms are already baked in — neutral angle and zero offset here
             marker_layer.setSize(vb_size * PT_TO_MM)
             marker_layer.setSizeUnit(QgsUnitTypes.RenderMillimeters)
             marker_layer.setAngle(0)
@@ -344,7 +322,6 @@ def create_simple_marker_from_vector(
 
             return marker_layer
 
-    # 6. Fallback: native QGIS simple marker (primitives and simple stems)
     fallback = QgsSimpleMarkerSymbolLayer()
 
     if primitive_name and primitive_name in MARKER_SHAPE_MAP:
@@ -363,20 +340,12 @@ def create_simple_marker_from_vector(
     fallback.setSize(base_size_pt * PT_TO_MM)
     fallback.setSizeUnit(QgsUnitTypes.RenderMillimeters)
 
-    # For angleToLine markers, do NOT apply offsetY/offsetX on the sub-symbol.
-    # When QgsMarkerLineSymbolLayer rotates the sub-symbol to follow the line
-    # tangent, the sub-symbol's local Y axis aligns WITH the line, so a
-    # sub-symbol offsetY would shift the marker along the line instead of
-    # across it. The perpendicular offset is applied at the marker-line level
-    # instead, in _create_single_marker_line().
     fallback.setAngle(-rotation)
     if bake_offset and not props.get("angleToLine"):
-        # Freestanding point marker — apply offset directly on the sub-layer.
         off_x_mm = props["offsetX"] * PT_TO_MM
         off_y_mm = -props["offsetY"] * PT_TO_MM
         fallback.setOffset(QPointF(off_x_mm, off_y_mm))
     else:
-        # Line marker context: caller will set offset on the sub-layer.
         fallback.setOffset(QPointF(0.0, 0.0))
     fallback.setOffsetUnit(QgsUnitTypes.RenderMillimeters)
 
