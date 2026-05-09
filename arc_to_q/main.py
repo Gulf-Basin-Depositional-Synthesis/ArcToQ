@@ -9,21 +9,24 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 def find_qgis_python_exec():
     """Attempt to find the QGIS python executable across different OS."""
+    
+    # 1. Allow users to force a specific QGIS install path via env variables
+    env_path = os.environ.get("QGIS_PYTHON_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
+        
     search_paths = []
     
     if sys.platform == "darwin":
-        # macOS paths
         search_paths = [
             "/Applications/QGIS*.app/Contents/MacOS/bin/python3",
             "/Applications/QGIS*.app/Contents/MacOS/python",
         ]
     elif sys.platform.startswith("linux"):
-        # Linux paths - often just the system python3 if qgis is installed system-wide
         search_paths = [
             "/usr/bin/python3",
         ]
     else:
-        # Windows paths
         search_paths = [
             r"C:\Program Files\QGIS *\bin\python-qgis-ltr.bat",
             r"C:\Program Files\QGIS *\bin\python-qgis.bat",
@@ -34,7 +37,6 @@ def find_qgis_python_exec():
     for pattern in search_paths:
         matches = glob.glob(pattern)
         if matches:
-            # Return the newest/highest version found
             return sorted(matches)[-1]
     return None
 
@@ -64,13 +66,10 @@ def main():
     input_path = os.path.abspath(args.input)
     output_path = os.path.abspath(args.output) if args.output else None
 
-    # Check if we are already in the QGIS environment
     try:
         import qgis.core
-        # If this succeeds, we are in the QGIS environment. Run the conversion.
         execute_conversion(input_path, output_path)
     except ImportError as e:
-        # Prevent infinite loop if the bat file fails to set up the environment properly
         if os.environ.get("ARCTOQ_RELAUNCHED") == "1":
             print(f"CRITICAL ERROR: Failed to import qgis.core even after relaunching.")
             print(f"Underlying error: {e}")
@@ -81,17 +80,17 @@ def main():
         qgis_exec = find_qgis_python_exec()
         
         if not qgis_exec:
-            print("ERROR: Could not find QGIS installation. Please run this script from the OSGeo4W shell or equivalent QGIS environment.")
+            print("ERROR: Could not find QGIS installation.")
+            print("Please set the 'QGIS_PYTHON_PATH' environment variable to point to your QGIS python executable.")
+            print("Example (Windows): set QGIS_PYTHON_PATH=C:\\Program Files\\QGIS 3.44.6\\bin\\python-qgis.bat")
             sys.exit(1)
             
         print(f"Found QGIS at: {qgis_exec}")
         print("Relaunching script in QGIS environment...\n" + "-"*40)
         
-        # Set an environment variable to prevent looping
         env = os.environ.copy()
         env["ARCTOQ_RELAUNCHED"] = "1"
         
-        # Relaunch THIS script using the QGIS executable
         cmd = [qgis_exec, __file__, input_path]
         if output_path:
             cmd.extend(["-o", output_path])

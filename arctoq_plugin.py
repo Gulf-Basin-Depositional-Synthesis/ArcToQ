@@ -2,14 +2,14 @@ import sys
 import os
 import tempfile
 import shutil
-from qgis.PyQt.QtCore import QEventLoop, Qt
+from qgis.PyQt.QtCore import Qt, QEventLoop
 from qgis.PyQt.QtGui import QIcon  
 from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, 
                                  QLabel, QPushButton, QTabWidget, QWidget, 
                                  QMessageBox, QAction, QApplication,
-                                 QFileDialog, QListWidget, QProgressBar)
+                                 QFileDialog, QListWidget, QProgressBar, QCheckBox)
 from qgis.gui import QgsFileWidget
-from qgis.core import QgsApplication, QgsProject, QgsLayerDefinition
+from qgis.core import QgsApplication, QgsProject, QgsLayerDefinition, QgsTask, Qgis
 
 # Dynamically add the plugin folder to the Python path so the 
 # arc_to_q logic can be imported without hardcoded local paths.
@@ -24,7 +24,7 @@ class ConvertDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Convert LYRX to QLR")
-        self.resize(550, 450)
+        self.resize(550, 480)
         
         # Main Layout
         layout = QVBoxLayout(self)
@@ -72,6 +72,10 @@ class ConvertDialog(QDialog):
         self.batch_layout.addLayout(list_btn_layout)
         
         self.batch_layout.addSpacing(10)
+
+        # Checkbox for Save in Place
+        self.save_in_place_cb = QCheckBox("Save converted files in their original directories")
+        self.batch_layout.addWidget(self.save_in_place_cb)
         
         self.batch_layout.addWidget(QLabel("Destination Directory"))
         self.out_dir_widget = QgsFileWidget()
@@ -100,7 +104,6 @@ class ConvertDialog(QDialog):
         layout.addLayout(btn_layout)
         
         # Connections
-        # REMOVED: self.run_btn.clicked.connect(self.accept) <-- This was closing the window too early
         self.close_btn.clicked.connect(self.reject)
         self.input_widget.fileChanged.connect(self.on_input_changed)
         
@@ -108,6 +111,7 @@ class ConvertDialog(QDialog):
         self.add_files_btn.clicked.connect(self.add_batch_files)
         self.remove_files_btn.clicked.connect(self.remove_batch_files)
         self.clear_files_btn.clicked.connect(self.file_list.clear)
+        self.save_in_place_cb.toggled.connect(self.out_dir_widget.setDisabled)
 
     def on_input_changed(self, file_path):
         if file_path and os.path.exists(file_path):
@@ -120,14 +124,12 @@ class ConvertDialog(QDialog):
         )
         if files:
             for f in files:
-                # Prevent adding duplicate files
                 if not self.file_list.findItems(f, Qt.MatchExactly):
                     self.file_list.addItem(f)
 
     def remove_batch_files(self):
         for item in self.file_list.selectedItems():
             self.file_list.takeItem(self.file_list.row(item))
-
 
 class ArcToQPlugin:
     def __init__(self, iface):
@@ -150,20 +152,21 @@ class ArcToQPlugin:
         self.iface.removeToolBarIcon(self.action)
 
     def run(self):
+        # Version Warning 
+        if Qgis.QGIS_VERSION_INT < 34400:
+            self.iface.messageBar().pushInfo(
+                "ArcToQ", 
+                "Your QGIS version is older. Some complex layer styling may not convert perfectly. Consider updating QGIS if you notice issues."
+            )
+
         dialog = ConvertDialog(self.iface.mainWindow())
-        
-        # Reset the progress bar when the dialog opens
         dialog.progress_bar.setValue(0)
-        
-        # Connect the Run button directly to our processing function
         dialog.run_btn.clicked.connect(lambda: self._process_conversion(dialog))
-        
         dialog.exec_()
 
     def _process_conversion(self, dialog):
         # Disable the run button so the user doesn't click it multiple times
         dialog.run_btn.setEnabled(False)
-        
         is_batch_mode = dialog.tabs.currentIndex() == 1
 
         try:
@@ -219,7 +222,6 @@ class ArcToQPlugin:
                     QgsProject.instance().layerTreeRoot()
                 )
             
-            # Optionally close the dialog after a successful single run
             dialog.accept()
             
         except Exception as e:
@@ -234,11 +236,12 @@ class ArcToQPlugin:
     def _run_batch(self, dialog):
         files_to_convert = [dialog.file_list.item(i).text() for i in range(dialog.file_list.count())]
         out_dir = os.path.normpath(dialog.out_dir_widget.filePath().strip())
+        save_in_place = dialog.save_in_place_cb.isChecked()
         
         if not files_to_convert:
             self.iface.messageBar().pushWarning("ArcToQ", "Please add at least one LYRX file to convert.")
             return
-        if not out_dir or out_dir == ".":
+        if not save_in_place and (not out_dir or out_dir == "."):
             self.iface.messageBar().pushWarning("ArcToQ", "Please select a destination directory.")
             return
 
@@ -259,7 +262,9 @@ class ArcToQPlugin:
             for index, lyrx_path in enumerate(files_to_convert):
                 lyrx_path = os.path.normpath(lyrx_path)
                 base_name = os.path.basename(lyrx_path)
-                out_file = os.path.join(out_dir, base_name.replace(".lyrx", ".qlr"))
+                
+                current_out_dir = os.path.dirname(lyrx_path) if save_in_place else out_dir
+                out_file = os.path.join(current_out_dir, base_name.replace(".lyrx", ".qlr"))
                 
                 try:
                     convert_lyrx(lyrx_path, temp_dir, qgs=QgsApplication.instance()) 
@@ -274,8 +279,15 @@ class ArcToQPlugin:
                         errors.append(f"{base_name}: No output file generated.")
                 except Exception as e:
                     errors.append(f"{base_name}: {str(e)}")
-                    
-                # Update progress bar and force UI to refresh while processing
+                    # Graceful cleanup of partially generated files on failure
+                    temp_generated_file = os.path.join(temp_dir, base_name.replace(".lyrx", ".qlr"))
+                    if os.path.exists(temp_generated_file):
+                        try:
+                            os.remove(temp_generated_file)
+                        except:
+                            pass
+                            
+                # Update progress bar and force UI to refresh while processing safely
                 dialog.progress_bar.setValue(index + 1)
                 QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
@@ -306,7 +318,6 @@ class ArcToQPlugin:
                         QgsProject.instance().layerTreeRoot()
                     )
             
-            # Close the dialog on completion 
             dialog.accept()
                     
         if errors:
