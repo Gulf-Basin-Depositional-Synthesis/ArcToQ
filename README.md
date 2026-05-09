@@ -37,6 +37,19 @@ You can either use the native QGIS plugin or run the layer converter from the QG
     <img src="images/inputgui.png" width="100%">
 4. The converter will run safely in the background. Once finished, a prompt will appear asking if you want to instantly load the converted layer directly into your current active map canvas.
 
+### 3. Batch Convert
+1. Open the ArcToQ plugin and switch to the Batch Process tab.
+2. Click Add Files... to select multiple `.lyrx` files, or use the list buttons to manage your queue.
+    <img src="images/batchgui.png" width="100%">
+3. Choose your output directory:
+
+    Check Save converted files in their original directories to save each `.qlr` alongside its source file.
+
+    OR leave it unchecked and select a specific Destination Directory to route all outputs to a single folder.
+
+4. Click Run. A progress bar will track the conversion.
+5. Once finished, a summary will display any errors, and you will have the option to load all successfully converted layers into your current project.
+
 ## **QGIS Python Environment**
 
 In this example, for Windows:
