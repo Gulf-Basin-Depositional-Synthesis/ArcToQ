@@ -316,25 +316,37 @@ class ArcToQPlugin:
 
         successes = []
         errors = []
-        renamed_files = [] # Track files that get automatically renamed
+        renamed_files = [] 
+        generated_destinations = set() # Track all paths we actively generate in THIS batch
 
         with tempfile.TemporaryDirectory() as temp_dir:
             for index, lyrx_path in enumerate(files_to_convert):
                 lyrx_path = os.path.normpath(lyrx_path)
-                # Safely slice off the extension to strictly enforce string type
                 base_name = os.path.basename(lyrx_path)
                 name_only = base_name[:-5] if base_name.lower().endswith(".lyrx") else base_name
                 
                 current_out_dir = os.path.dirname(lyrx_path) if save_in_place else out_dir
                 out_file = os.path.join(current_out_dir, f"{name_only}.qlr")
                 
-                # Auto-rename: cleanly append (1), (2), etc. using F-strings
-                if not allow_overwrite and os.path.exists(out_file):
+                # We rename if Overwrite is OFF AND the file exists on disk, 
+                # OR if we already created a file with this exact name during THIS batch run.
+                needs_rename = (not allow_overwrite and os.path.exists(out_file)) or (out_file in generated_destinations)
+                
+                if needs_rename:
                     counter = 1
-                    while os.path.exists(out_file):
-                        out_file = os.path.join(current_out_dir, f"{name_only} ({counter}).qlr")
+                    while True:
+                        test_out_file = os.path.join(current_out_dir, f"{name_only} ({counter}).qlr")
+                        # Ensure the new name hasn't been generated in this batch
+                        if test_out_file not in generated_destinations:
+                            # Ensure either we can overwrite, or it doesn't exist on disk
+                            if allow_overwrite or not os.path.exists(test_out_file):
+                                out_file = test_out_file
+                                break
                         counter += 1
+                    
                     renamed_files.append(f"{base_name}  ->  {os.path.basename(out_file)}")
+                
+                generated_destinations.add(out_file)
                 
                 try:
                     convert_lyrx(lyrx_path, temp_dir, qgs=QgsApplication.instance()) 
@@ -372,13 +384,13 @@ class ArcToQPlugin:
             else:
                 self.iface.messageBar().pushSuccess("ArcToQ", msg)
                 
-            # Show the new rename notification dialog
+            # Show the rename notification dialog if anything had to be dynamically renumbered
             if renamed_files:
                 rename_msg = "\n".join(renamed_files)
                 QMessageBox.information(
                     self.iface.mainWindow(), 
                     "Files Renamed", 
-                    f"To prevent overwriting, the following QLRs were automatically renamed:\n\n{rename_msg}"
+                    f"To prevent overwriting existing files or duplicate names, the following QLRs were automatically renamed:\n\n{rename_msg}"
                 )
                 
             reply = QMessageBox.question(
