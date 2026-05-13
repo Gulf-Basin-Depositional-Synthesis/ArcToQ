@@ -24,7 +24,7 @@ class ConvertDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Convert LYRX to QLR")
-        self.resize(550, 550)
+        self.resize(550, 580) # Slightly taller to fit new checkbox
         
         # Main Layout
         layout = QVBoxLayout(self)
@@ -85,6 +85,10 @@ class ConvertDialog(QDialog):
         self.save_in_place_cb = QCheckBox("Save converted files in their original directories")
         self.batch_layout.addWidget(self.save_in_place_cb)
 
+        # Checkbox for Mirror Structure
+        self.mirror_structure_cb = QCheckBox("Mirror original folder structure in destination")
+        self.batch_layout.addWidget(self.mirror_structure_cb)
+
         # Checkbox for Overwriting
         self.overwrite_cb = QCheckBox("Overwrite existing QLR files")
         self.overwrite_cb.setChecked(False) # Safe default
@@ -125,7 +129,14 @@ class ConvertDialog(QDialog):
         self.add_folder_btn.clicked.connect(self.add_batch_folder)
         self.remove_files_btn.clicked.connect(self.remove_batch_files)
         self.clear_files_btn.clicked.connect(self.file_list.clear)
-        self.save_in_place_cb.toggled.connect(self.out_dir_widget.setDisabled)
+        self.save_in_place_cb.toggled.connect(self.on_save_in_place_toggled)
+
+    def on_save_in_place_toggled(self, checked):
+        # Disable Destination elements if Save In Place is active
+        self.out_dir_widget.setDisabled(checked)
+        self.mirror_structure_cb.setDisabled(checked)
+        if checked:
+            self.mirror_structure_cb.setChecked(False)
 
     def on_input_changed(self, file_path):
         if file_path and os.path.exists(file_path):
@@ -170,7 +181,6 @@ class ConvertDialog(QDialog):
             )
             return
 
-        # Add to list and track how many were newly added
         added_count = 0
         for f in files_to_add:
             f_norm = os.path.normpath(f)
@@ -210,7 +220,6 @@ class ArcToQPlugin:
         self.iface.removeToolBarIcon(self.action)
 
     def run(self):
-        # Version Warning 
         if Qgis.QGIS_VERSION_INT < 34400:
             self.iface.messageBar().pushInfo(
                 "ArcToQ", 
@@ -223,7 +232,6 @@ class ArcToQPlugin:
         dialog.exec_()
 
     def _process_conversion(self, dialog):
-        # Disable the run button so the user doesn't click it multiple times
         dialog.run_btn.setEnabled(False)
         is_batch_mode = dialog.tabs.currentIndex() == 1
 
@@ -233,7 +241,6 @@ class ArcToQPlugin:
             else:
                 self._run_batch(dialog)
         finally:
-            # Re-enable the button once processing is finished
             dialog.run_btn.setEnabled(True)
 
     def _run_single(self, dialog):
@@ -294,7 +301,9 @@ class ArcToQPlugin:
     def _run_batch(self, dialog):
         files_to_convert = [dialog.file_list.item(i).text() for i in range(dialog.file_list.count())]
         out_dir = os.path.normpath(dialog.out_dir_widget.filePath().strip())
+        
         save_in_place = dialog.save_in_place_cb.isChecked()
+        mirror_structure = dialog.mirror_structure_cb.isChecked()
         allow_overwrite = dialog.overwrite_cb.isChecked()
         
         if not files_to_convert:
@@ -304,9 +313,20 @@ class ArcToQPlugin:
             self.iface.messageBar().pushWarning("ArcToQ", "Please select a destination directory.")
             return
 
+        # Determine the base common path if we are mirroring
+        common_base = None
+        if mirror_structure and not save_in_place:
+            try:
+                # Find the deepest shared folder path of all selected files
+                dirs = [os.path.dirname(f) for f in files_to_convert]
+                common_base = os.path.commonpath(dirs)
+            except ValueError:
+                # Fallback if files span across different drives (Windows)
+                self.iface.messageBar().pushWarning("ArcToQ", "Cannot mirror folder structure across different drives. Saving flatly.")
+                mirror_structure = False
+
         total_files = len(files_to_convert)
         
-        # Configure the progress bar
         dialog.progress_bar.setMaximum(total_files)
         dialog.progress_bar.setValue(0)
 
@@ -317,7 +337,7 @@ class ArcToQPlugin:
         successes = []
         errors = []
         renamed_files = [] 
-        generated_destinations = set() # Track all paths we actively generate in THIS batch
+        generated_destinations = set()
 
         with tempfile.TemporaryDirectory() as temp_dir:
             for index, lyrx_path in enumerate(files_to_convert):
@@ -325,20 +345,26 @@ class ArcToQPlugin:
                 base_name = os.path.basename(lyrx_path)
                 name_only = base_name[:-5] if base_name.lower().endswith(".lyrx") else base_name
                 
-                current_out_dir = os.path.dirname(lyrx_path) if save_in_place else out_dir
+                # Determine destination directory for this specific file
+                if save_in_place:
+                    current_out_dir = os.path.dirname(lyrx_path)
+                elif mirror_structure and common_base:
+                    # Calculate its relative place and append it to the chosen destination output
+                    rel_path = os.path.relpath(os.path.dirname(lyrx_path), common_base)
+                    current_out_dir = os.path.join(out_dir, rel_path) if rel_path != '.' else out_dir
+                    os.makedirs(current_out_dir, exist_ok=True) # Dynamically generate the folder tree!
+                else:
+                    current_out_dir = out_dir
+                
                 out_file = os.path.join(current_out_dir, f"{name_only}.qlr")
                 
-                # We rename if Overwrite is OFF AND the file exists on disk, 
-                # OR if we already created a file with this exact name during THIS batch run.
                 needs_rename = (not allow_overwrite and os.path.exists(out_file)) or (out_file in generated_destinations)
                 
                 if needs_rename:
                     counter = 1
                     while True:
                         test_out_file = os.path.join(current_out_dir, f"{name_only} ({counter}).qlr")
-                        # Ensure the new name hasn't been generated in this batch
                         if test_out_file not in generated_destinations:
-                            # Ensure either we can overwrite, or it doesn't exist on disk
                             if allow_overwrite or not os.path.exists(test_out_file):
                                 out_file = test_out_file
                                 break
@@ -361,7 +387,6 @@ class ArcToQPlugin:
                         errors.append(f"{base_name}: No output file generated.")
                 except Exception as e:
                     errors.append(f"{base_name}: {str(e)}")
-                    # Graceful cleanup of partially generated files on failure
                     temp_generated_file = os.path.join(temp_dir, base_name.replace(".lyrx", ".qlr"))
                     if os.path.exists(temp_generated_file):
                         try:
@@ -369,7 +394,6 @@ class ArcToQPlugin:
                         except:
                             pass
                             
-                # Update progress bar and force UI to refresh while processing safely
                 dialog.progress_bar.setValue(index + 1)
                 QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
@@ -384,7 +408,6 @@ class ArcToQPlugin:
             else:
                 self.iface.messageBar().pushSuccess("ArcToQ", msg)
                 
-            # Show the rename notification dialog if anything had to be dynamically renumbered
             if renamed_files:
                 rename_msg = "\n".join(renamed_files)
                 QMessageBox.information(
