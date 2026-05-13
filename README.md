@@ -35,7 +35,7 @@ You can either use the native QGIS plugin or run the layer converter from the QG
 2. A file browser will open. Select the ArcGIS `.lyrx` file you want to convert.
 3. Choose the output directory where you want the new `.qlr` file to be saved.  
     <img src="images/inputgui.png" width="100%">
-4. The converter will run safely in the background. Once finished, a prompt will appear asking if you want to instantly load the converted layer directly into your current active map canvas.
+4. The converter will run. Once finished, a prompt will appear asking if you want to instantly load the converted layer directly into your current active map canvas.
 
 ### 3. Batch Convert
 1. Open the ArcToQ plugin and switch to the Batch Process tab.

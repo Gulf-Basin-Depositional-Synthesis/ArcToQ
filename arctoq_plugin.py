@@ -24,7 +24,7 @@ class ConvertDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Convert LYRX to QLR")
-        self.resize(550, 480)
+        self.resize(550, 520) # Slightly increased height to accommodate new buttons
         
         # Main Layout
         layout = QVBoxLayout(self)
@@ -61,15 +61,23 @@ class ConvertDialog(QDialog):
         self.file_list = QListWidget()
         self.batch_layout.addWidget(self.file_list)
         
-        # Buttons to manage the batch list
+        # Buttons to manage the batch list (Files & Folders)
         list_btn_layout = QHBoxLayout()
         self.add_files_btn = QPushButton("Add Files...")
+        self.add_folder_btn = QPushButton("Add Folder...")
         self.remove_files_btn = QPushButton("Remove Selected")
         self.clear_files_btn = QPushButton("Clear All")
+        
         list_btn_layout.addWidget(self.add_files_btn)
+        list_btn_layout.addWidget(self.add_folder_btn)
         list_btn_layout.addWidget(self.remove_files_btn)
         list_btn_layout.addWidget(self.clear_files_btn)
         self.batch_layout.addLayout(list_btn_layout)
+        
+        # Checkbox for recursive folder search
+        self.include_subdirs_cb = QCheckBox("Include subdirectories when adding folders")
+        self.include_subdirs_cb.setChecked(True)
+        self.batch_layout.addWidget(self.include_subdirs_cb)
         
         self.batch_layout.addSpacing(10)
 
@@ -109,6 +117,7 @@ class ConvertDialog(QDialog):
         
         # Batch tab connections
         self.add_files_btn.clicked.connect(self.add_batch_files)
+        self.add_folder_btn.clicked.connect(self.add_batch_folder)
         self.remove_files_btn.clicked.connect(self.remove_batch_files)
         self.clear_files_btn.clicked.connect(self.file_list.clear)
         self.save_in_place_cb.toggled.connect(self.out_dir_widget.setDisabled)
@@ -124,12 +133,56 @@ class ConvertDialog(QDialog):
         )
         if files:
             for f in files:
-                if not self.file_list.findItems(f, Qt.MatchExactly):
-                    self.file_list.addItem(f)
+                f_norm = os.path.normpath(f)
+                if not self.file_list.findItems(f_norm, Qt.MatchExactly):
+                    self.file_list.addItem(f_norm)
+
+    def add_batch_folder(self):
+        folder_path = QFileDialog.getExistingDirectory(
+            self, "Select Folder Containing LYRX Files"
+        )
+        if not folder_path:
+            return
+            
+        recursive = self.include_subdirs_cb.isChecked()
+        files_to_add = []
+        
+        if recursive:
+            for root, dirs, files in os.walk(folder_path):
+                for file in files:
+                    if file.lower().endswith('.lyrx'):
+                        files_to_add.append(os.path.join(root, file))
+        else:
+            for file in os.listdir(folder_path):
+                full_path = os.path.join(folder_path, file)
+                if os.path.isfile(full_path) and file.lower().endswith('.lyrx'):
+                    files_to_add.append(full_path)
+                    
+        if not files_to_add:
+            QMessageBox.information(
+                self, "No Files Found", 
+                "No LYRX files were found in the selected directory."
+            )
+            return
+
+        # Add to list and track how many were newly added
+        added_count = 0
+        for f in files_to_add:
+            f_norm = os.path.normpath(f)
+            if not self.file_list.findItems(f_norm, Qt.MatchExactly):
+                self.file_list.addItem(f_norm)
+                added_count += 1
+                
+        if added_count == 0:
+            QMessageBox.information(
+                self, "No New Files", 
+                "All LYRX files found in the directory are already in the list."
+            )
 
     def remove_batch_files(self):
         for item in self.file_list.selectedItems():
             self.file_list.takeItem(self.file_list.row(item))
+
 
 class ArcToQPlugin:
     def __init__(self, iface):
