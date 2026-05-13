@@ -24,7 +24,7 @@ class ConvertDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Convert LYRX to QLR")
-        self.resize(550, 520) # Slightly increased height to accommodate new buttons
+        self.resize(550, 520) 
         
         # Main Layout
         layout = QVBoxLayout(self)
