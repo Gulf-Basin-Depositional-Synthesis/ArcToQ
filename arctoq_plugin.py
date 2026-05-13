@@ -24,7 +24,7 @@ class ConvertDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Convert LYRX to QLR")
-        self.resize(550, 520) 
+        self.resize(550, 550) # Increased height to fit new checkboxes
         
         # Main Layout
         layout = QVBoxLayout(self)
@@ -84,6 +84,11 @@ class ConvertDialog(QDialog):
         # Checkbox for Save in Place
         self.save_in_place_cb = QCheckBox("Save converted files in their original directories")
         self.batch_layout.addWidget(self.save_in_place_cb)
+
+        # Checkbox for Overwriting
+        self.overwrite_cb = QCheckBox("Overwrite existing QLR files")
+        self.overwrite_cb.setChecked(False) # Safe default
+        self.batch_layout.addWidget(self.overwrite_cb)
         
         self.batch_layout.addWidget(QLabel("Destination Directory"))
         self.out_dir_widget = QgsFileWidget()
@@ -138,6 +143,7 @@ class ConvertDialog(QDialog):
                     self.file_list.addItem(f_norm)
 
     def add_batch_folder(self):
+        # Reverted to native OS Directory picker
         folder_path = QFileDialog.getExistingDirectory(
             self, "Select Folder Containing LYRX Files"
         )
@@ -290,6 +296,7 @@ class ArcToQPlugin:
         files_to_convert = [dialog.file_list.item(i).text() for i in range(dialog.file_list.count())]
         out_dir = os.path.normpath(dialog.out_dir_widget.filePath().strip())
         save_in_place = dialog.save_in_place_cb.isChecked()
+        allow_overwrite = dialog.overwrite_cb.isChecked()
         
         if not files_to_convert:
             self.iface.messageBar().pushWarning("ArcToQ", "Please add at least one LYRX file to convert.")
@@ -318,6 +325,13 @@ class ArcToQPlugin:
                 
                 current_out_dir = os.path.dirname(lyrx_path) if save_in_place else out_dir
                 out_file = os.path.join(current_out_dir, base_name.replace(".lyrx", ".qlr"))
+                
+                # Safe-guard: Skip file if overwrite is disabled and file exists
+                if not allow_overwrite and os.path.exists(out_file):
+                    errors.append(f"{base_name}: Skipped (QLR already exists)")
+                    dialog.progress_bar.setValue(index + 1)
+                    QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    continue
                 
                 try:
                     convert_lyrx(lyrx_path, temp_dir, qgs=QgsApplication.instance()) 
@@ -350,7 +364,7 @@ class ArcToQPlugin:
             msg = f"Successfully converted {len(successes)} of {total_files} files."
             
             if errors:
-                msg += " Some errors occurred."
+                msg += " Some files were skipped or had errors."
                 self.iface.messageBar().pushWarning("ArcToQ", msg)
             else:
                 self.iface.messageBar().pushSuccess("ArcToQ", msg)
@@ -377,6 +391,6 @@ class ArcToQPlugin:
             err_msg = "\n".join(errors)
             QMessageBox.warning(
                 self.iface.mainWindow(), 
-                "Batch Conversion Errors", 
-                f"The following files failed to convert:\n\n{err_msg}"
+                "Batch Conversion Notice", 
+                f"The following files were not converted:\n\n{err_msg}"
             )
