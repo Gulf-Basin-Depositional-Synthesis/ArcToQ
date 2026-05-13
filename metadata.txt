@@ -2,7 +2,7 @@
 name=ArcToQ Converter
 qgisMinimumVersion=3.4
 description=Converts ArcGIS Pro layer files (.lyrx) to QGIS layer files (.qlr) directly from the toolbar.
-version=1.1
+version=1.4
 author=GBDS
 email=GBDS@ig.utexas.edu
 about=A native QGIS plugin that reads ArcGIS JSON styling and translates vector, raster, and text symbology to their QGIS XML equivalents.
