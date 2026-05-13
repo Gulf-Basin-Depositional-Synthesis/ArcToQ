@@ -86,7 +86,7 @@ class ConvertDialog(QDialog):
         self.batch_layout.addWidget(self.save_in_place_cb)
 
         # Checkbox for Overwriting
-        self.overwrite_cb = QCheckBox("Overwrite existing QLR files (otherwise appends numbers)")
+        self.overwrite_cb = QCheckBox("Overwrite existing QLR files")
         self.overwrite_cb.setChecked(False) # Safe default
         self.batch_layout.addWidget(self.overwrite_cb)
         
@@ -316,30 +316,31 @@ class ArcToQPlugin:
 
         successes = []
         errors = []
+        renamed_files = [] # Track files that get automatically renamed
 
         with tempfile.TemporaryDirectory() as temp_dir:
             for index, lyrx_path in enumerate(files_to_convert):
                 lyrx_path = os.path.normpath(lyrx_path)
+                # Safely slice off the extension to strictly enforce string type
                 base_name = os.path.basename(lyrx_path)
+                name_only = base_name[:-5] if base_name.lower().endswith(".lyrx") else base_name
                 
                 current_out_dir = os.path.dirname(lyrx_path) if save_in_place else out_dir
-                base_out_name = base_name.replace(".lyrx", ".qlr")
-                out_file = os.path.join(current_out_dir, base_out_name)
+                out_file = os.path.join(current_out_dir, f"{name_only}.qlr")
                 
-                # Auto-rename: append (1), (2), etc. if overwrite is disabled and file exists
+                # Auto-rename: cleanly append (1), (2), etc. using F-strings
                 if not allow_overwrite and os.path.exists(out_file):
-                    name_only = os.path.splitext(base_out_name)
                     counter = 1
                     while os.path.exists(out_file):
                         out_file = os.path.join(current_out_dir, f"{name_only} ({counter}).qlr")
                         counter += 1
+                    renamed_files.append(f"{base_name}  ->  {os.path.basename(out_file)}")
                 
                 try:
                     convert_lyrx(lyrx_path, temp_dir, qgs=QgsApplication.instance()) 
                     temp_generated_file = os.path.join(temp_dir, base_name.replace(".lyrx", ".qlr"))
                     
                     if os.path.exists(temp_generated_file):
-                        # The `out_file` is either safely uniquely named now, or user requested overwrite
                         if os.path.exists(out_file):
                             os.remove(out_file)
                         shutil.move(temp_generated_file, out_file)
@@ -370,6 +371,15 @@ class ArcToQPlugin:
                 self.iface.messageBar().pushWarning("ArcToQ", msg)
             else:
                 self.iface.messageBar().pushSuccess("ArcToQ", msg)
+                
+            # Show the new rename notification dialog
+            if renamed_files:
+                rename_msg = "\n".join(renamed_files)
+                QMessageBox.information(
+                    self.iface.mainWindow(), 
+                    "Files Renamed", 
+                    f"To prevent overwriting, the following QLRs were automatically renamed:\n\n{rename_msg}"
+                )
                 
             reply = QMessageBox.question(
                 self.iface.mainWindow(), 
