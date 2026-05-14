@@ -86,7 +86,7 @@ class ConvertDialog(QDialog):
         self.batch_layout.addWidget(self.save_in_place_cb)
 
         # Checkbox for Mirror Structure
-        self.mirror_structure_cb = QCheckBox("Mirror original folder structure in destination")
+        self.mirror_structure_cb = QCheckBox("Recreate original folder structure in destination")
         self.batch_layout.addWidget(self.mirror_structure_cb)
 
         # Checkbox for Overwriting
@@ -94,7 +94,7 @@ class ConvertDialog(QDialog):
         self.overwrite_cb.setChecked(False) # Safe default
         self.batch_layout.addWidget(self.overwrite_cb)
         
-        self.batch_layout.addWidget(QLabel("Destination Directory"))
+        self.batch_layout.addWidget(QLabel("Destination Folder"))
         self.out_dir_widget = QgsFileWidget()
         self.out_dir_widget.setStorageMode(QgsFileWidget.GetDirectory)
         self.batch_layout.addWidget(self.out_dir_widget)
@@ -177,7 +177,7 @@ class ConvertDialog(QDialog):
         if not files_to_add:
             QMessageBox.information(
                 self, "No Files Found", 
-                "No LYRX files were found in the selected directory."
+                "No LYRX files were found in the selected folder."
             )
             return
 
@@ -191,7 +191,7 @@ class ConvertDialog(QDialog):
         if added_count == 0:
             QMessageBox.information(
                 self, "No New Files", 
-                "All LYRX files found in the directory are already in the list."
+                "All LYRX files found in the folder are already in the list."
             )
 
     def remove_batch_files(self):
@@ -310,7 +310,7 @@ class ArcToQPlugin:
             self.iface.messageBar().pushWarning("ArcToQ", "Please add at least one LYRX file to convert.")
             return
         if not save_in_place and (not out_dir or out_dir == "."):
-            self.iface.messageBar().pushWarning("ArcToQ", "Please select a destination directory.")
+            self.iface.messageBar().pushWarning("ArcToQ", "Please select a destination folder.")
             return
 
         # Determine the base common path if we are mirroring
