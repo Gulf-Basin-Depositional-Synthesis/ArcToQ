@@ -171,24 +171,10 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
     """
     # --- Handle Web Feature Services ---
     if factory == "FeatureService":
-        # Strip 'URL=' prefix if present
         url = conn_str.replace("URL=", "").strip()
-        
-        # Construct the base URL (Service + Layer ID)
-        if url.endswith("/"):
-            base_url = f"{url}{dataset}"
-        else:
-            base_url = f"{url}/{dataset}"
-            
-        # Create a proper QGIS URI for the 'arcgisfeatureserver' provider.
-        # It expects a string like: "url='https://.../MapServer/1' crs='...'"
+        base_url = f"{url}{dataset}" if url.endswith("/") else f"{url}/{dataset}"
         ds_uri = QgsDataSourceUri()
         ds_uri.setParam("url", base_url)
-        
-        # If you had a definition query, you might set it here too, but for now
-        # we return the URI string. The provider often handles SQL via 'sql=' param
-        # but standard QGIS subset strings might not apply directly without loading.
-        
         uri = ds_uri.uri()
         return uri, uri, "arcgisfeatureserver"
 
@@ -198,50 +184,56 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
     else:
         raw_path = conn_str
 
+    # Normalize dataset slashes immediately — the value from the LYRX JSON
+    # may contain backslashes (e.g. "tif\FrioFeldsparContent.tif")
+    dataset = dataset.replace("\\", "/")
+
     lyrx_dir = Path(in_folder)
     abs_path = (lyrx_dir / raw_path).resolve()
+    abs_posix = abs_path.as_posix()
 
-    provider = "ogr" # Default to OGR for vector files
+    provider = "ogr"
 
-    # Absolute URI
+    # --- Absolute URI ---
     if factory == "FileGDB":
-        if dataset_type == "esriDTFeatureClass" or dataset_type == "esriDTTable":
-            abs_uri = f"{abs_path.as_posix()}|layername={dataset}"
+        if dataset_type in ("esriDTFeatureClass", "esriDTTable"):
+            abs_uri = f"{abs_posix}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
-            abs_uri = os.path.join(abs_path.as_posix(), dataset)
+            abs_uri = f"{abs_posix}/{dataset}"  # forward slash, not os.path.join
             provider = "gdal"
         else:
             raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
-        # Shapefiles, Rasters, etc.
-        abs_uri = os.path.join(abs_path.as_posix(), dataset)
+        abs_uri = f"{abs_posix}/{dataset}"  # forward slash, not os.path.join
         if dataset_type == "esriDTRasterDataset":
             provider = "gdal"
 
-    # Relative URI
+    # --- Relative URI ---
     out_dir = Path(out_file).parent.resolve()
     try:
         rel_path = Path(os.path.relpath(abs_path, start=out_dir))
     except ValueError:
-        # If paths are on different drives, relpath fails. Fallback to absolute.
         rel_path = abs_path
 
+    rel_posix = rel_path.as_posix()
+
     if factory == "FileGDB":
-        if dataset_type == "esriDTFeatureClass" or dataset_type == "esriDTTable":
-            rel_uri = f"{rel_path.as_posix()}|layername={dataset}"
+        if dataset_type in ("esriDTFeatureClass", "esriDTTable"):
+            rel_uri = f"{rel_posix}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
-            rel_uri = os.path.join(rel_path.as_posix(), dataset)
+            rel_uri = f"{rel_posix}/{dataset}"  # forward slash, not os.path.join
         else:
             raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
-        rel_uri = os.path.join(rel_path.as_posix(), dataset)
+        rel_uri = f"{rel_posix}/{dataset}"  # forward slash, not os.path.join
 
+    # --- Shapefile extension and definition query ---
     if dataset_type == "esriDTFeatureClass":
         if factory == "Shapefile":
-            if not rel_uri.lower().endswith(".shp"):
-                rel_uri += ".shp"
             if not abs_uri.lower().endswith(".shp"):
                 abs_uri += ".shp"
+            if not rel_uri.lower().endswith(".shp"):
+                rel_uri += ".shp"
 
         if def_query:
             abs_uri += def_query
