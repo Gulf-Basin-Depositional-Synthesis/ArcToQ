@@ -190,7 +190,18 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
 
     lyrx_dir = Path(in_folder)
     abs_path = (lyrx_dir / raw_path).resolve()
-    abs_posix = abs_path.as_posix()
+
+    # --- UNC path handling ---
+    # UNC paths (\\server\share\...) must keep backslashes for GDAL on Windows.
+    # as_posix() converts them to //server/share/... which GDAL cannot open.
+    # We detect UNC by checking if the drive component starts with '\\'.
+    is_unc = str(abs_path).startswith("\\\\") or (
+        hasattr(abs_path, 'drive') and abs_path.drive.startswith("\\\\")
+    )
+    if is_unc:
+        abs_posix = str(abs_path)          # keep native backslashes for GDAL
+    else:
+        abs_posix = abs_path.as_posix()    # forward slashes fine for local paths
 
     provider = "ogr"
 
@@ -199,20 +210,26 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
         if dataset_type in ("esriDTFeatureClass", "esriDTTable"):
             abs_uri = f"{abs_posix}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
-            abs_uri = f"{abs_posix}/{dataset}"  # forward slash, not os.path.join
+            sep = "\\" if is_unc else "/"
+            abs_uri = f"{abs_posix}{sep}{dataset}"
             provider = "gdal"
         else:
             raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
-        abs_uri = f"{abs_posix}/{dataset}"  # forward slash, not os.path.join
+        sep = "\\" if is_unc else "/"
+        abs_uri = f"{abs_posix}{sep}{dataset}"
         if dataset_type == "esriDTRasterDataset":
             provider = "gdal"
 
     # --- Relative URI ---
+    # Relative paths are only used as a fallback for local layers in QGIS,
+    # so we always use forward slashes here regardless of UNC status.
     out_dir = Path(out_file).parent.resolve()
     try:
         rel_path = Path(os.path.relpath(abs_path, start=out_dir))
     except ValueError:
+        # os.path.relpath raises ValueError when paths are on different drives (Windows).
+        # This always happens with UNC paths vs a local out_dir, so fall back to absolute.
         rel_path = abs_path
 
     rel_posix = rel_path.as_posix()
@@ -221,11 +238,11 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
         if dataset_type in ("esriDTFeatureClass", "esriDTTable"):
             rel_uri = f"{rel_posix}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
-            rel_uri = f"{rel_posix}/{dataset}"  # forward slash, not os.path.join
+            rel_uri = f"{rel_posix}/{dataset}"
         else:
             raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
-        rel_uri = f"{rel_posix}/{dataset}"  # forward slash, not os.path.join
+        rel_uri = f"{rel_posix}/{dataset}"
 
     # --- Shapefile extension and definition query ---
     if dataset_type == "esriDTFeatureClass":
