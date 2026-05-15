@@ -228,7 +228,9 @@ class ConvertDialog(QDialog):
             total = job.get("total", 0)
             success = job.get("success", 0)
             
-            job_item.setText(1, f"{j_type} ({total} files)")
+            file_word = "file" if total == 1 else "files"
+            job_item.setText(1, f"{j_type} ({total} {file_word})")
+            # ---------------------------
             
             if success == total and total > 0:
                 job_item.setText(2, "Success")
