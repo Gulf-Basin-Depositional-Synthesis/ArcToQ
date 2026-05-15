@@ -248,7 +248,7 @@ def _parse_where_clause(where: str) -> str:
     to
     "\"WellData_GeoSetting\" NOT IN (1,2)"
     """
-    return where
+    return re.sub(r'\bNOT\s+in\b', 'NOT IN', where, flags=re.IGNORECASE)
 
 
 def set_labels(layer: QgsVectorLayer, layer_def: dict):

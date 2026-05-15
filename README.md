@@ -12,6 +12,17 @@ This project is in its early stages, so don't expect working code of files that 
 - View and manage conversion history and error logs directly within QGIS
 - You can request additional features in the [Issues tab](https://github.com/Gulf-Basin-Depositional-Synthesis/ArcToQ/issues)
 
+## Known Limitations
+ 
+The following are not currently supported. Consider supporting development or contributing to the codebase.
+ 
+**File Formats**
+- `.aprx` project files — only `.lyrx` layer files are supported
+- `.lyr` (legacy ArcMap layer files)
+
+**Layer Types**
+- Annotation layers
+
 ## Requirements
 
 - QGIS version 3.40 or greater (for PyQGIS)
