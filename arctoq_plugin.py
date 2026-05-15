@@ -236,6 +236,7 @@ class ConvertDialog(QDialog):
         body += f"{code_block}python\n"
         body += f"{error_msg}\n"
         body += f"{code_block}\n\n"
+        body += "More Details"
         body += "**To Reproduce**\n"
         body += "Steps to reproduce the behavior:\n"
         body += f"1. Attempt to convert `{file_name}` using ArcToQ.\n"
