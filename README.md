@@ -25,6 +25,7 @@ The following are not currently supported. Consider supporting development or co
 
 **Features**
 - Esri fonts if not installed
+- If the source gdb is compressed it will not convert
 
 ## Requirements
 
