@@ -5,6 +5,8 @@ import shutil
 import json
 from datetime import datetime
 import textwrap
+import platform
+import urllib.parse
 from qgis.PyQt.QtCore import Qt, QEventLoop, QUrl
 from qgis.PyQt.QtGui import QIcon, QDesktopServices
 from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, 
@@ -198,11 +200,38 @@ class ConvertDialog(QDialog):
         
         layout.addWidget(text_edit)
         
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        # If this is a child item (a file) and it failed, show the report button
+        if item.parent() is not None and item.text(2) == "Failed":
+            report_btn = QPushButton("Report Bug on GitHub")
+            report_btn.setStyleSheet("background-color: #2ea44f; color: white; font-weight: bold;") # Give it a GitHub green style
+            
+            # Grab the filename and error message specifically
+            file_name = item.text(1)
+            error_msg = item.text(3)
+            report_btn.clicked.connect(lambda: self.report_to_github(file_name, error_msg))
+            btn_layout.addWidget(report_btn)
+        
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(dialog.accept)
-        layout.addWidget(close_btn)
+        btn_layout.addWidget(close_btn)
         
+        layout.addLayout(btn_layout)
         dialog.exec_()
+
+    def report_to_github(self, file_name, error_msg):
+        """Constructs a pre-filled GitHub issue URL and opens it in the browser."""
+        os_info = f"{platform.system()} {platform.release()}"
+        qgis_ver = Qgis.QGIS_VERSION
+        
+        body = f"""**Describe the bug**
+Failed to convert `{file_name}`. 
+Error trace:
+```python
+{error_msg}
 
     def load_history(self):
         self.history_tree.clear()
