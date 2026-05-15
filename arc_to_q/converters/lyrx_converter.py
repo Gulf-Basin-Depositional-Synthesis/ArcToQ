@@ -297,6 +297,59 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
  
     return abs_uri, rel_uri, provider
 
+def _parse_source(in_folder, data_connection, def_query, out_file):
+    """Build both absolute and relative QGIS-friendly URIs for a dataset.
+    
+    Handles both direct feature class connections and joined tables.
+    
+    Args:
+        in_folder (str): Path to the folder containing the .lyrx file.
+        data_connection (dict): The data connection info from the .lyrx file.
+        def_query (str): The definition query string to append to the URI (or empty string).
+            The query should already be in QGIS-compatible format, including the leading "|subset=".
+        out_file (str): Path to the converted QGIS .qlr file.
+    Returns:
+        tuple: (abs_uri, rel_uri, join_info)
+          - abs_uri: Absolute QGIS URI for the base dataset
+          - rel_uri: Relative QGIS URI for the base dataset
+          - join_info: dict describing join (or None if not a join)
+        tuple: ( (abs_uri, rel_uri, provider), join_info )
+    """
+    factory = data_connection.get("workspaceFactory")
+    conn_str = data_connection.get("workspaceConnectionString", "")
+    dataset = data_connection.get("dataset")
+    dataset_type = data_connection.get("datasetType")
+
+    # --- Handle direct connections (FileGDB, Shapefile, Raster) ---
+    if factory and conn_str and dataset:
+        return _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file), None
+
+    # --- Handle table join (CIMRelQueryTableDataConnection) ---
+    if data_connection.get("type") == "CIMRelQueryTableDataConnection":
+        if def_query:
+            raise NotImplementedError("Definition queries on joined layers are not yet supported.")
+
+        source = data_connection.get("sourceTable", {})
+        dest = data_connection.get("destinationTable", {})
+
+        (abs_uri, rel_uri, src_provider), _ = _parse_source(in_folder, source, "", out_file)
+        (abs_table_uri, rel_table_uri, dest_provider), _ = _parse_source(in_folder, dest, "", out_file)
+
+        join_info = {
+            "primaryKey": data_connection.get("primaryKey"),
+            "foreignKey": data_connection.get("foreignKey"),
+            "joinType": data_connection.get("joinType", "esriLeftOuterJoin"),
+            "destinationAbs": abs_table_uri,
+            "destinationRel": rel_table_uri,
+            "destinationName": dest.get("dataset"),
+            "sourceProvider": src_provider,
+            "destinationProvider": dest_provider
+        }
+
+        return (abs_uri, rel_uri, src_provider), join_info
+
+    raise NotImplementedError(f"Unsupported dataConnection type: {data_connection.get('type')}")
+
 
 def _set_layer_transparency(layer: QgsMapLayer, layer_def: dict):
     """Set the transparency for a QGIS layer based on the ArcGIS layer definition."""
