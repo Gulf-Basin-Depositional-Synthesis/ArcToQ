@@ -105,7 +105,9 @@ class BatchWorker(QThread):
 
                 self.progress.emit(index + 1)
 
+        print("worker about to emit finished")
         self.finished.emit()
+        print("worker emitted finished")
 
 
 class ConvertDialog(QDialog):
