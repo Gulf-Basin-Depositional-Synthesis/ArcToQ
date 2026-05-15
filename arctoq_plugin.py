@@ -121,7 +121,10 @@ class ConvertDialog(QDialog):
         
         self.history_tree = QTreeWidget()
         self.history_tree.setHeaderLabels(["Date/Time", "Job / File", "Status", "Details"])
-        self.history_tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.history_tree.header().setSectionResizeMode(1, QHeaderView.Interactive)
+        
+        # Force the Details column (Index 3) to stretch and fill remaining space
+        self.history_tree.header().setSectionResizeMode(3, QHeaderView.Stretch)
         self.history_tree.setWordWrap(True) 
         
         self.history_tree.itemDoubleClicked.connect(self.show_item_details)
