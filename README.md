@@ -23,6 +23,9 @@ The following are not currently supported. Consider supporting development or co
 **Layer Types**
 - Annotation layers
 
+**Features**
+- Esri fonts if not installed
+
 ## Requirements
 
 - QGIS version 3.40 or greater (for PyQGIS)

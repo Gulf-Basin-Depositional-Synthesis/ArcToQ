@@ -206,7 +206,7 @@ class ConvertDialog(QDialog):
         
         # If this is a child item (a file) and it failed, show the report button
         if item.parent() is not None and item.text(2) == "Failed":
-            report_btn = QPushButton("Report Bug on GitHub")
+            report_btn = QPushButton("Report Issue on GitHub")
             report_btn.setStyleSheet("background-color: #2ea44f; color: white; font-weight: bold;")
             
             file_name = item.text(1)
