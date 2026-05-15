@@ -4,13 +4,14 @@ import tempfile
 import shutil
 import json
 from datetime import datetime
+import textwrap
 from qgis.PyQt.QtCore import Qt, QEventLoop, QUrl
 from qgis.PyQt.QtGui import QIcon, QDesktopServices
 from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, 
                                  QLabel, QPushButton, QTabWidget, QWidget, 
                                  QMessageBox, QAction, QApplication,
                                  QFileDialog, QListWidget, QProgressBar, QCheckBox,
-                                 QTreeWidget, QTreeWidgetItem, QHeaderView)
+                                 QTreeWidget, QTreeWidgetItem, QHeaderView, QTextEdit)
 from qgis.gui import QgsFileWidget
 from qgis.core import QgsApplication, QgsProject, QgsLayerDefinition, QgsTask, Qgis
 
@@ -115,6 +116,7 @@ class ConvertDialog(QDialog):
         self.tabs.addTab(self.batch_tab, "Batch Process")
 
         # --- TAB 3: Jobs (History) ---
+        self.history_tree.itemDoubleClicked.connect(self.show_item_details)
         self.jobs_tab = QWidget()
         self.jobs_layout = QVBoxLayout(self.jobs_tab)
         
@@ -168,6 +170,30 @@ class ConvertDialog(QDialog):
 
     # --- History / Jobs Methods ---
 
+    def show_item_details(self, item, column):
+        """Opens a scrollable, resizable popup when an item is double-clicked."""
+        text = item.text(column)
+        if not text:
+            return
+            
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Item Details")
+        dialog.resize(500, 200)
+        
+        layout = QVBoxLayout(dialog)
+        
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setPlainText(text)
+        
+        layout.addWidget(text_edit)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.exec_()
+
     def load_history(self):
         self.history_tree.clear()
         if not os.path.exists(self.history_file):
@@ -178,6 +204,10 @@ class ConvertDialog(QDialog):
                 history = json.load(f)
         except Exception:
             history = []
+
+        # Helper to wrap long tooltips
+        def wrap_tooltip(text):
+            return "\n".join(textwrap.wrap(text, width=80, break_long_words=True))
 
         # Load in reverse so newest is on top
         for job in reversed(history):
@@ -202,7 +232,7 @@ class ConvertDialog(QDialog):
                 
             details_text = f"{success} Success, {total - success} Failed"
             job_item.setText(3, details_text)
-            job_item.setToolTip(3, details_text) # ADD TOOLTIP HERE
+            job_item.setToolTip(3, wrap_tooltip(details_text))
 
             # Child file items
             for f_data in job.get("files", []):
@@ -217,13 +247,13 @@ class ConvertDialog(QDialog):
                     
                     out_dir = os.path.dirname(f_data.get("output", ""))
                     file_item.setText(3, out_dir)
-                    file_item.setToolTip(3, out_dir) # ADD TOOLTIP HERE
+                    file_item.setToolTip(3, wrap_tooltip(out_dir))
                 else:
                     file_item.setForeground(2, Qt.red)
                     
                     err_msg = f_data.get("error", "")
                     file_item.setText(3, err_msg)
-                    file_item.setToolTip(3, err_msg) # ADD TOOLTIP HERE
+                    file_item.setToolTip(3, wrap_tooltip(err_msg))
 
     def append_job_to_history(self, job_data):
         history = []
