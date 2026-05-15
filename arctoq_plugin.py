@@ -121,6 +121,8 @@ class ConvertDialog(QDialog):
         self.history_tree = QTreeWidget()
         self.history_tree.setHeaderLabels(["Date/Time", "Job / File", "Status", "Details"])
         self.history_tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.history_tree.setWordWrap(True) 
+        
         self.jobs_layout.addWidget(self.history_tree)
 
         jobs_btn_layout = QHBoxLayout()
@@ -198,7 +200,9 @@ class ConvertDialog(QDialog):
                 job_item.setText(2, "Partial Success")
                 job_item.setForeground(2, Qt.darkYellow)
                 
-            job_item.setText(3, f"{success} Success, {total - success} Failed")
+            details_text = f"{success} Success, {total - success} Failed"
+            job_item.setText(3, details_text)
+            job_item.setToolTip(3, details_text) # ADD TOOLTIP HERE
 
             # Child file items
             for f_data in job.get("files", []):
@@ -209,11 +213,17 @@ class ConvertDialog(QDialog):
                 file_item.setText(2, f_status)
                 if f_status == "Success":
                     file_item.setForeground(2, Qt.darkGreen)
-                    file_item.setData(0, Qt.UserRole, f_data.get("output", "")) # Store path for easy opening
-                    file_item.setText(3, os.path.dirname(f_data.get("output", "")))
+                    file_item.setData(0, Qt.UserRole, f_data.get("output", "")) 
+                    
+                    out_dir = os.path.dirname(f_data.get("output", ""))
+                    file_item.setText(3, out_dir)
+                    file_item.setToolTip(3, out_dir) # ADD TOOLTIP HERE
                 else:
                     file_item.setForeground(2, Qt.red)
-                    file_item.setText(3, f_data.get("error", ""))
+                    
+                    err_msg = f_data.get("error", "")
+                    file_item.setText(3, err_msg)
+                    file_item.setToolTip(3, err_msg) # ADD TOOLTIP HERE
 
     def append_job_to_history(self, job_data):
         history = []
