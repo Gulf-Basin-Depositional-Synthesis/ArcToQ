@@ -271,7 +271,7 @@ class ConvertDialog(QDialog):
         self._worker.progress.connect(self.progress_bar.setValue)
         self._worker.file_result.connect(self._on_file_result)
         self._worker.finished.connect(lambda: print("LAMBDA FIRED"), Qt.QueuedConnection)
-        self._worker.finished.connect(self._on_batch_finished, Qt.QueuedConnection)
+        self._worker.finished.connect(lambda: self._on_batch_finished(), Qt.QueuedConnection)
         print("finished signal connected")
         self._worker.start()
         print("worker started, thread running:", self._worker.isRunning())
