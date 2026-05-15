@@ -192,9 +192,7 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
         # relative UNC path to the full \\server.fqdn\share\... form, which
         # GDAL on Windows often cannot open (especially with spaces in the path).
         # abspath() just does string arithmetic and leaves drive letters intact.
-        abs_path_str = os.path.normpath(
-            os.path.abspath(os.path.join(str(lyrx_dir), raw_path))
-        )
+        abs_path_str = os.path.normpath(os.path.join(str(lyrx_dir), raw_path))
         abs_path = Path(abs_path_str)
         # Keep native OS separators for GDAL (backslashes on Windows)
         abs_posix = abs_path_str
