@@ -47,7 +47,8 @@ class BatchWorker(QThread):
         self._cancel = True
 
     def run(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir = tempfile.mkdtemp()
+        try:
             for index, lyrx_path in enumerate(self.files):
                 if self._cancel:
                     break
@@ -94,7 +95,6 @@ class BatchWorker(QThread):
                     else:
                         raise Exception("No output file generated.")
                 except Exception as e:
-                    # Clean up any partial temp file
                     temp_generated_file = os.path.join(temp_dir, base_name.replace(".lyrx", ".qlr"))
                     if os.path.exists(temp_generated_file):
                         try:
@@ -105,9 +105,9 @@ class BatchWorker(QThread):
 
                 self.progress.emit(index + 1)
 
-        print("worker about to emit finished")
-        self.finished.emit()
-        print("worker emitted finished")
+        finally:
+            self.finished.emit()
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class ConvertDialog(QDialog):
