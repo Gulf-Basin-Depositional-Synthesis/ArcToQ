@@ -7,7 +7,7 @@ from datetime import datetime
 import textwrap
 import platform
 import urllib.parse
-from qgis.PyQt.QtCore import Qt, QEventLoop, QUrl
+from qgis.PyQt.QtCore import Qt, QEventLoop, QUrl, QThread, pyqtSignal
 from qgis.PyQt.QtGui import QIcon, QDesktopServices
 from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, 
                                  QLabel, QPushButton, QTabWidget, QWidget, 
@@ -26,11 +26,95 @@ if plugin_dir not in sys.path:
 from arc_to_q.converters.lyrx_converter import convert_lyrx
 
 
+class BatchWorker(QThread):
+    """Worker thread for batch LYRX conversion."""
+    progress = pyqtSignal(int)                        # current file index (1-based)
+    file_result = pyqtSignal(str, str, bool, str)     # input, output, success, error
+    finished = pyqtSignal()
+
+    def __init__(self, files, out_dir, save_in_place, mirror_structure, allow_overwrite, common_base):
+        super().__init__()
+        self.files = files
+        self.out_dir = out_dir
+        self.save_in_place = save_in_place
+        self.mirror_structure = mirror_structure
+        self.allow_overwrite = allow_overwrite
+        self.common_base = common_base
+        self._cancel = False
+        self._generated_destinations = set()
+
+    def stop(self):
+        self._cancel = True
+
+    def run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for index, lyrx_path in enumerate(self.files):
+                if self._cancel:
+                    break
+
+                lyrx_path = os.path.normpath(lyrx_path)
+                base_name = os.path.basename(lyrx_path)
+                name_only = base_name[:-5] if base_name.lower().endswith(".lyrx") else base_name
+
+                # Determine output directory
+                if self.save_in_place:
+                    current_out_dir = os.path.dirname(lyrx_path)
+                elif self.mirror_structure and self.common_base:
+                    rel_path = os.path.relpath(os.path.dirname(lyrx_path), self.common_base)
+                    current_out_dir = os.path.join(self.out_dir, rel_path) if rel_path != '.' else self.out_dir
+                    os.makedirs(current_out_dir, exist_ok=True)
+                else:
+                    current_out_dir = self.out_dir
+
+                out_file = os.path.join(current_out_dir, f"{name_only}.qlr")
+
+                # Handle naming conflicts
+                needs_rename = (not self.allow_overwrite and os.path.exists(out_file)) or (out_file in self._generated_destinations)
+                if needs_rename:
+                    counter = 1
+                    while True:
+                        test_out_file = os.path.join(current_out_dir, f"{name_only} ({counter}).qlr")
+                        if test_out_file not in self._generated_destinations:
+                            if self.allow_overwrite or not os.path.exists(test_out_file):
+                                out_file = test_out_file
+                                break
+                        counter += 1
+
+                self._generated_destinations.add(out_file)
+
+                try:
+                    convert_lyrx(lyrx_path, temp_dir, qgs=QgsApplication.instance())
+                    temp_generated_file = os.path.join(temp_dir, base_name.replace(".lyrx", ".qlr"))
+
+                    if os.path.exists(temp_generated_file):
+                        if os.path.exists(out_file):
+                            os.remove(out_file)
+                        shutil.move(temp_generated_file, out_file)
+                        self.file_result.emit(lyrx_path, out_file, True, "")
+                    else:
+                        raise Exception("No output file generated.")
+                except Exception as e:
+                    # Clean up any partial temp file
+                    temp_generated_file = os.path.join(temp_dir, base_name.replace(".lyrx", ".qlr"))
+                    if os.path.exists(temp_generated_file):
+                        try:
+                            os.remove(temp_generated_file)
+                        except Exception:
+                            pass
+                    self.file_result.emit(lyrx_path, "", False, str(e))
+
+                self.progress.emit(index + 1)
+
+        self.finished.emit()
+
+
 class ConvertDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Convert LYRX to QLR")
-        self.resize(650, 600) # Slightly larger to accommodate the history tree
+        self.resize(650, 600)
+        self._worker = None
+        self._batch_job_data = None
         
         # Main Layout
         layout = QVBoxLayout(self)
@@ -65,42 +149,34 @@ class ConvertDialog(QDialog):
         
         self.batch_layout.addWidget(QLabel("Select LYRX files to convert:"))
         self.file_list = QListWidget()
-        
         self.file_list.setSelectionMode(QListWidget.ExtendedSelection) 
-        
         self.batch_layout.addWidget(self.file_list)
         
-        # Buttons to manage the batch list (Files & Folders)
         list_btn_layout = QHBoxLayout()
         self.add_files_btn = QPushButton("Add Files...")
         self.add_folder_btn = QPushButton("Add Folder...")
         self.remove_files_btn = QPushButton("Remove Selected")
         self.clear_files_btn = QPushButton("Clear All")
-        
         list_btn_layout.addWidget(self.add_files_btn)
         list_btn_layout.addWidget(self.add_folder_btn)
         list_btn_layout.addWidget(self.remove_files_btn)
         list_btn_layout.addWidget(self.clear_files_btn)
         self.batch_layout.addLayout(list_btn_layout)
         
-        # Checkbox for recursive folder search
         self.include_subdirs_cb = QCheckBox("Include subdirectories when adding folders")
         self.include_subdirs_cb.setChecked(True)
         self.batch_layout.addWidget(self.include_subdirs_cb)
         
         self.batch_layout.addSpacing(10)
 
-        # Checkbox for Save in Place
         self.save_in_place_cb = QCheckBox("Save converted files in their original directories")
         self.batch_layout.addWidget(self.save_in_place_cb)
 
-        # Checkbox for Mirror Structure
         self.mirror_structure_cb = QCheckBox("Recreate original folder structure in destination")
         self.batch_layout.addWidget(self.mirror_structure_cb)
 
-        # Checkbox for Overwriting
         self.overwrite_cb = QCheckBox("Overwrite existing QLR files")
-        self.overwrite_cb.setChecked(False) # Safe default
+        self.overwrite_cb.setChecked(False)
         self.batch_layout.addWidget(self.overwrite_cb)
         
         self.batch_layout.addWidget(QLabel("Destination Folder"))
@@ -110,7 +186,6 @@ class ConvertDialog(QDialog):
         
         self.batch_layout.addSpacing(10)
         
-        # Progress Bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         self.batch_layout.addWidget(self.progress_bar)
@@ -123,20 +198,11 @@ class ConvertDialog(QDialog):
         
         self.history_tree = QTreeWidget()
         self.history_tree.setHeaderLabels(["Date/Time", "Job / File", "Status", "Details"])
-        
-        # --- Scrollbar ---
         self.history_tree.setTextElideMode(Qt.ElideNone) 
-        
-        # Change BOTH columns to Interactive so they don't force themselves to shrink
         self.history_tree.header().setSectionResizeMode(1, QHeaderView.Interactive)
         self.history_tree.header().setSectionResizeMode(3, QHeaderView.Interactive)
-        
-        # Add a horizontal scrollbar that appears when needed
         self.history_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        # ---------------------------
-        
         self.history_tree.itemDoubleClicked.connect(self.show_item_details)
-        
         self.jobs_layout.addWidget(self.history_tree)
 
         jobs_btn_layout = QHBoxLayout()
@@ -154,36 +220,132 @@ class ConvertDialog(QDialog):
         # Run / Close Buttons
         btn_layout = QHBoxLayout()
         self.run_btn = QPushButton("Run")
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setVisible(False)
         self.close_btn = QPushButton("Close")
         btn_layout.addStretch()
         btn_layout.addWidget(self.run_btn)
+        btn_layout.addWidget(self.cancel_btn)
         btn_layout.addWidget(self.close_btn)
-        
         layout.addLayout(btn_layout)
         
         # Connections
         self.close_btn.clicked.connect(self.reject)
+        self.cancel_btn.clicked.connect(self._cancel_batch)
         self.input_widget.fileChanged.connect(self.on_input_changed)
-        
-        # Batch tab connections
         self.add_files_btn.clicked.connect(self.add_batch_files)
         self.add_folder_btn.clicked.connect(self.add_batch_folder)
         self.remove_files_btn.clicked.connect(self.remove_batch_files)
         self.clear_files_btn.clicked.connect(self.file_list.clear)
         self.save_in_place_cb.toggled.connect(self.on_save_in_place_toggled)
-
-        # Jobs tab connections
         self.open_dest_btn.clicked.connect(self.open_destination)
         self.clear_history_btn.clicked.connect(self.clear_history)
 
-        # Load history on startup
         self.history_file = os.path.join(QgsApplication.qgisSettingsDirPath(), "arctoq_history.json")
         self.load_history()
+
+    # --- Batch threading ---
+
+    def _start_batch(self, files, out_dir, save_in_place, mirror_structure, allow_overwrite, common_base, total_files):
+        self._batch_job_data = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "type": "Batch",
+            "total": total_files,
+            "success": 0,
+            "files": [],
+            "successes": [],
+            "errors": [],
+        }
+
+        self.progress_bar.setMaximum(total_files)
+        self.progress_bar.setValue(0)
+        self.run_btn.setVisible(False)
+        self.cancel_btn.setVisible(True)
+        self.close_btn.setEnabled(False)
+        self._set_batch_controls_enabled(False)
+
+        self._worker = BatchWorker(files, out_dir, save_in_place, mirror_structure, allow_overwrite, common_base)
+        self._worker.progress.connect(self.progress_bar.setValue)
+        self._worker.file_result.connect(self._on_file_result)
+        self._worker.finished.connect(self._on_batch_finished)
+        self._worker.start()
+
+    def _cancel_batch(self):
+        if self._worker:
+            self._worker.stop()
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("Cancelling...")
+
+    def _on_file_result(self, input_path, output_path, success, error):
+        job = self._batch_job_data
+        if success:
+            job["success"] += 1
+            job["successes"].append(output_path)
+            job["files"].append({"input": input_path, "output": output_path, "status": "Success", "error": ""})
+        else:
+            job["errors"].append(f"{os.path.basename(input_path)}: {error}")
+            job["files"].append({"input": input_path, "output": "", "status": "Failed", "error": error})
+
+    def _on_batch_finished(self):
+        self.run_btn.setVisible(True)
+        self.cancel_btn.setVisible(False)
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.setText("Cancel")
+        self.close_btn.setEnabled(True)
+        self._set_batch_controls_enabled(True)
+
+        job = self._batch_job_data
+        self.append_job_to_history({k: v for k, v in job.items() if k not in ("successes", "errors")})
+
+        successes = job["successes"]
+        errors = job["errors"]
+        total = job["total"]
+
+        if not successes and not errors:
+            # Cancelled before any files processed
+            return
+
+        if successes:
+            msg = f"Successfully converted {len(successes)} of {total} files."
+            if errors:
+                msg += " Some files had errors."
+
+            reply = QMessageBox.question(
+                self,
+                "Batch Conversion Complete",
+                f"{msg}\n\nWould you like to load the successfully converted QLRs into the current project?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                for qlr in successes:
+                    QgsLayerDefinition.loadLayerDefinition(
+                        qlr,
+                        QgsProject.instance(),
+                        QgsProject.instance().layerTreeRoot()
+                    )
+
+        if errors:
+            err_msg = "\n".join(errors)
+            QMessageBox.warning(
+                self,
+                "Batch Conversion Notice",
+                f"The following files were not converted:\n\n{err_msg}"
+            )
+
+        self._worker = None
+        self._batch_job_data = None
+
+    def _set_batch_controls_enabled(self, enabled):
+        for widget in [self.add_files_btn, self.add_folder_btn, self.remove_files_btn,
+                       self.clear_files_btn, self.out_dir_widget, self.save_in_place_cb,
+                       self.mirror_structure_cb, self.overwrite_cb, self.include_subdirs_cb,
+                       self.file_list]:
+            widget.setEnabled(enabled)
 
     # --- History / Jobs Methods ---
 
     def show_item_details(self, item, column):
-        """Opens a scrollable, resizable popup when an item is double-clicked."""
         text = item.text(column)
         if not text:
             return
@@ -191,51 +353,41 @@ class ConvertDialog(QDialog):
         dialog = QDialog(self)
         dialog.setWindowTitle("Item Details")
         dialog.resize(500, 200)
-        
         layout = QVBoxLayout(dialog)
         
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
         text_edit.setPlainText(text)
-        
         layout.addWidget(text_edit)
         
-        # Buttons
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         
-        # If this is a child item (a file) and it failed, show the report button
         if item.parent() is not None and item.text(2) == "Failed":
             report_btn = QPushButton("Report Issue on GitHub")
             report_btn.setStyleSheet("background-color: #2ea44f; color: white; font-weight: bold;")
-            
             file_name = item.text(1)
             error_msg = item.text(3)
-            # Use default arguments in lambda to lock in the variable values
             report_btn.clicked.connect(lambda checked=False, f=file_name, e=error_msg: self.report_to_github(f, e))
             btn_layout.addWidget(report_btn)
         
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(dialog.accept)
         btn_layout.addWidget(close_btn)
-        
         layout.addLayout(btn_layout)
         dialog.exec_()
 
     def report_to_github(self, file_name, error_msg, max_error_chars=2000):
-        """Constructs a pre-filled GitHub issue URL and opens it in the browser."""
         os_info = f"{platform.system()} {platform.release()}"
         qgis_ver = Qgis.QGIS_VERSION
-        
-        # Using a variable for backticks prevents the chat window from breaking the code block
         code_block = "```"
+        truncated = error_msg[:max_error_chars] + ("\n... (truncated)" if len(error_msg) > max_error_chars else "")
         
         body = "**Describe the issue**\n"
         body += f"Failed to convert `{file_name}`.\n\n"
-        body += "More Details:\n\n"
+        body += "More Details:\n"
         body += "Error trace:\n"
         body += f"{code_block}python\n"
-        truncated = error_msg[:max_error_chars] + ("\n... (truncated)" if len(error_msg) > max_error_chars else "")
         body += f"{truncated}\n"
         body += f"{code_block}\n\n"
         body += "**To Reproduce**\n"
@@ -249,12 +401,9 @@ class ConvertDialog(QDialog):
         body += "**Attachments**\n"
         body += f"Please drop the problematic `{file_name}` file and any relevant screenshots here.\n"
         
-        # URL encode the title and body so they can be passed safely in a web link
         title = urllib.parse.quote(f"[Bug] Conversion failed for {file_name}")
         body_encoded = urllib.parse.quote(body)
-        
         url = f"https://github.com/Gulf-Basin-Depositional-Synthesis/ArcToQ/issues/new?labels=bug&title={title}&body={body_encoded}"
-        
         QDesktopServices.openUrl(QUrl(url))
 
     def load_history(self):
@@ -268,11 +417,9 @@ class ConvertDialog(QDialog):
         except Exception:
             history = []
 
-        # Helper to wrap long tooltips
         def wrap_tooltip(text):
             return "\n".join(textwrap.wrap(text, width=80, break_long_words=True))
 
-        # Load in reverse so newest is on top
         for job in reversed(history):
             job_item = QTreeWidgetItem(self.history_tree)
             job_item.setText(0, job.get("timestamp", ""))
@@ -280,10 +427,8 @@ class ConvertDialog(QDialog):
             j_type = job.get("type", "Unknown")
             total = job.get("total", 0)
             success = job.get("success", 0)
-            
             file_word = "file" if total == 1 else "files"
             job_item.setText(1, f"{j_type} ({total} {file_word})")
-            # ---------------------------
             
             if success == total and total > 0:
                 job_item.setText(2, "Success")
@@ -299,23 +444,19 @@ class ConvertDialog(QDialog):
             job_item.setText(3, details_text)
             job_item.setToolTip(3, wrap_tooltip(details_text))
 
-            # Child file items
             for f_data in job.get("files", []):
                 file_item = QTreeWidgetItem(job_item)
                 file_item.setText(1, os.path.basename(f_data.get("input", "")))
-                
                 f_status = f_data.get("status", "")
                 file_item.setText(2, f_status)
                 if f_status == "Success":
                     file_item.setForeground(2, Qt.darkGreen)
-                    file_item.setData(0, Qt.UserRole, f_data.get("output", "")) 
-                    
+                    file_item.setData(0, Qt.UserRole, f_data.get("output", ""))
                     out_dir = os.path.dirname(f_data.get("output", ""))
                     file_item.setText(3, out_dir)
                     file_item.setToolTip(3, wrap_tooltip(out_dir))
                 else:
                     file_item.setForeground(2, Qt.red)
-                    
                     err_msg = f_data.get("error", "")
                     file_item.setText(3, err_msg)
                     file_item.setToolTip(3, wrap_tooltip(err_msg))
@@ -328,9 +469,7 @@ class ConvertDialog(QDialog):
                     history = json.load(f)
             except Exception:
                 pass
-        
         history.append(job_data)
-        
         try:
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(history, f, indent=4)
@@ -353,10 +492,8 @@ class ConvertDialog(QDialog):
         item = selected[0]
         path_to_open = None
 
-        # Check if it's a file item (child)
         if item.parent() is not None:
             path_to_open = item.data(0, Qt.UserRole)
-        # Check if it's a job item (parent)
         else:
             for i in range(item.childCount()):
                 child = item.child(i)
@@ -373,7 +510,6 @@ class ConvertDialog(QDialog):
     # --- General Tab Methods ---
 
     def on_save_in_place_toggled(self, checked):
-        # Disable Destination elements if Save In Place is active
         self.out_dir_widget.setDisabled(checked)
         self.mirror_structure_cb.setDisabled(checked)
         if checked:
@@ -385,9 +521,7 @@ class ConvertDialog(QDialog):
             self.output_widget.setFilePath(suggested_out)
 
     def add_batch_files(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "Select LYRX Files", "", "Layer Files (*.lyrx)"
-        )
+        files, _ = QFileDialog.getOpenFileNames(self, "Select LYRX Files", "", "Layer Files (*.lyrx)")
         if files:
             for f in files:
                 f_norm = os.path.normpath(f)
@@ -395,9 +529,7 @@ class ConvertDialog(QDialog):
                     self.file_list.addItem(f_norm)
 
     def add_batch_folder(self):
-        folder_path = QFileDialog.getExistingDirectory(
-            self, "Select Folder Containing LYRX Files"
-        )
+        folder_path = QFileDialog.getExistingDirectory(self, "Select Folder Containing LYRX Files")
         if not folder_path:
             return
             
@@ -416,10 +548,7 @@ class ConvertDialog(QDialog):
                     files_to_add.append(full_path)
                     
         if not files_to_add:
-            QMessageBox.information(
-                self, "No Files Found", 
-                "No LYRX files were found in the selected folder."
-            )
+            QMessageBox.information(self, "No Files Found", "No LYRX files were found in the selected folder.")
             return
 
         added_count = 0
@@ -430,10 +559,7 @@ class ConvertDialog(QDialog):
                 added_count += 1
                 
         if added_count == 0:
-            QMessageBox.information(
-                self, "No New Files", 
-                "All LYRX files found in the folder are already in the list."
-            )
+            QMessageBox.information(self, "No New Files", "All LYRX files found in the folder are already in the list.")
 
     def remove_batch_files(self):
         for item in self.file_list.selectedItems():
@@ -452,7 +578,6 @@ class ArcToQPlugin:
         self.action.setObjectName("ArcToQAction")
         self.action.setToolTip("Select ArcGIS .lyrx file(s) to convert")
         self.action.triggered.connect(self.run)
-
         self.iface.addToolBarIcon(self.action)
         self.iface.addPluginToMenu("&ArcToQ", self.action)
 
@@ -463,7 +588,7 @@ class ArcToQPlugin:
     def run(self):
         if Qgis.QGIS_VERSION_INT < 34400:
             self.iface.messageBar().pushInfo(
-                "ArcToQ", 
+                "ArcToQ",
                 "Your QGIS version is older. Some complex layer styling may not convert perfectly. Consider updating QGIS if you notice issues."
             )
 
@@ -473,16 +598,15 @@ class ArcToQPlugin:
         dialog.exec_()
 
     def _process_conversion(self, dialog):
-        dialog.run_btn.setEnabled(False)
         is_batch_mode = dialog.tabs.currentIndex() == 1
-
-        try:
-            if not is_batch_mode:
+        if not is_batch_mode:
+            dialog.run_btn.setEnabled(False)
+            try:
                 self._run_single(dialog)
-            else:
-                self._run_batch(dialog)
-        finally:
-            dialog.run_btn.setEnabled(True)
+            finally:
+                dialog.run_btn.setEnabled(True)
+        else:
+            self._run_batch(dialog)
 
     def _run_single(self, dialog):
         lyrx_path = os.path.normpath(dialog.input_widget.filePath().strip())
@@ -502,19 +626,18 @@ class ArcToQPlugin:
         try:
             self.iface.messageBar().clearWidgets()
             self.iface.messageBar().pushInfo("ArcToQ", f"Converting {os.path.basename(lyrx_path)}...")
-            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents) 
+            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
             
             with tempfile.TemporaryDirectory() as temp_dir:
-                convert_lyrx(lyrx_path, temp_dir, qgs=QgsApplication.instance()) 
+                convert_lyrx(lyrx_path, temp_dir, qgs=QgsApplication.instance())
                 temp_generated_file = os.path.normpath(
                     os.path.join(temp_dir, os.path.basename(lyrx_path).replace(".lyrx", ".qlr"))
                 )
                 
                 if os.path.exists(temp_generated_file):
                     if os.path.exists(out_file):
-                        os.remove(out_file) 
+                        os.remove(out_file)
                     shutil.move(temp_generated_file, out_file)
-                    
                     job_data["success"] = 1
                     job_data["files"].append({
                         "input": lyrx_path, "output": out_file, "status": "Success", "error": ""
@@ -527,8 +650,8 @@ class ArcToQPlugin:
             dialog.append_job_to_history(job_data)
             
             reply = QMessageBox.question(
-                self.iface.mainWindow(), 
-                "Success", 
+                self.iface.mainWindow(),
+                "Success",
                 f"Successfully converted layer.\nSaved to: {out_file}\n\nWould you like to load the QLR into the current project?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes
@@ -536,8 +659,8 @@ class ArcToQPlugin:
             
             if reply == QMessageBox.Yes:
                 QgsLayerDefinition.loadLayerDefinition(
-                    out_file, 
-                    QgsProject.instance(), 
+                    out_file,
+                    QgsProject.instance(),
                     QgsProject.instance().layerTreeRoot()
                 )
             
@@ -549,23 +672,21 @@ class ArcToQPlugin:
                 "input": lyrx_path, "output": "", "status": "Failed", "error": str(e)
             })
             dialog.append_job_to_history(job_data)
-
             self.iface.messageBar().clearWidgets()
             self.iface.messageBar().pushCritical("ArcToQ", f"Conversion failed: {str(e)}")
             QMessageBox.critical(
-                self.iface.mainWindow(), 
-                "Conversion Error", 
+                self.iface.mainWindow(),
+                "Conversion Error",
                 f"Failed to convert {os.path.basename(lyrx_path)}:\n\n{str(e)}"
             )
 
     def _run_batch(self, dialog):
         files_to_convert = [dialog.file_list.item(i).text() for i in range(dialog.file_list.count())]
         out_dir = os.path.normpath(dialog.out_dir_widget.filePath().strip())
-        
         save_in_place = dialog.save_in_place_cb.isChecked()
         mirror_structure = dialog.mirror_structure_cb.isChecked()
         allow_overwrite = dialog.overwrite_cb.isChecked()
-        
+
         if not files_to_convert:
             self.iface.messageBar().pushWarning("ArcToQ", "Please add at least one LYRX file to convert.")
             return
@@ -573,149 +694,16 @@ class ArcToQPlugin:
             self.iface.messageBar().pushWarning("ArcToQ", "Please select a destination folder.")
             return
 
-        # Determine the base common path if we are mirroring
         common_base = None
         if mirror_structure and not save_in_place:
             try:
-                # Find the deepest shared folder path of all selected files
                 dirs = [os.path.dirname(f) for f in files_to_convert]
                 common_base = os.path.commonpath(dirs)
             except ValueError:
-                # Fallback if files span across different drives (Windows)
                 self.iface.messageBar().pushWarning("ArcToQ", "Cannot mirror folder structure across different drives. Saving flatly.")
                 mirror_structure = False
 
-        total_files = len(files_to_convert)
-        
-        job_data = {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "type": "Batch",
-            "total": total_files,
-            "success": 0,
-            "files": []
-        }
-        
-        dialog.progress_bar.setMaximum(total_files)
-        dialog.progress_bar.setValue(0)
-
-        self.iface.messageBar().clearWidgets()
-        self.iface.messageBar().pushInfo("ArcToQ", f"Batch converting {total_files} files...")
-        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents) 
-
-        successes = []
-        errors = []
-        renamed_files = [] 
-        generated_destinations = set()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            for index, lyrx_path in enumerate(files_to_convert):
-                lyrx_path = os.path.normpath(lyrx_path)
-                base_name = os.path.basename(lyrx_path)
-                name_only = base_name[:-5] if base_name.lower().endswith(".lyrx") else base_name
-                
-                # Determine destination directory for this specific file
-                if save_in_place:
-                    current_out_dir = os.path.dirname(lyrx_path)
-                elif mirror_structure and common_base:
-                    rel_path = os.path.relpath(os.path.dirname(lyrx_path), common_base)
-                    current_out_dir = os.path.join(out_dir, rel_path) if rel_path != '.' else out_dir
-                    os.makedirs(current_out_dir, exist_ok=True) 
-                else:
-                    current_out_dir = out_dir
-                
-                out_file = os.path.join(current_out_dir, f"{name_only}.qlr")
-                
-                needs_rename = (not allow_overwrite and os.path.exists(out_file)) or (out_file in generated_destinations)
-                
-                if needs_rename:
-                    counter = 1
-                    while True:
-                        test_out_file = os.path.join(current_out_dir, f"{name_only} ({counter}).qlr")
-                        if test_out_file not in generated_destinations:
-                            if allow_overwrite or not os.path.exists(test_out_file):
-                                out_file = test_out_file
-                                break
-                        counter += 1
-                    
-                    renamed_files.append(f"{base_name}  ->  {os.path.basename(out_file)}")
-                
-                generated_destinations.add(out_file)
-                
-                try:
-                    convert_lyrx(lyrx_path, temp_dir, qgs=QgsApplication.instance()) 
-                    temp_generated_file = os.path.join(temp_dir, base_name.replace(".lyrx", ".qlr"))
-                    
-                    if os.path.exists(temp_generated_file):
-                        if os.path.exists(out_file):
-                            os.remove(out_file)
-                        shutil.move(temp_generated_file, out_file)
-                        successes.append(out_file)
-                        
-                        job_data["files"].append({
-                            "input": lyrx_path, "output": out_file, "status": "Success", "error": ""
-                        })
-                        job_data["success"] += 1
-                    else:
-                        raise Exception("No output file generated.")
-                except Exception as e:
-                    errors.append(f"{base_name}: {str(e)}")
-                    job_data["files"].append({
-                        "input": lyrx_path, "output": "", "status": "Failed", "error": str(e)
-                    })
-                    temp_generated_file = os.path.join(temp_dir, base_name.replace(".lyrx", ".qlr"))
-                    if os.path.exists(temp_generated_file):
-                        try:
-                            os.remove(temp_generated_file)
-                        except:
-                            pass
-                            
-                dialog.progress_bar.setValue(index + 1)
-                QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
-
-        # Save Job history
-        dialog.append_job_to_history(job_data)
-
-        self.iface.messageBar().clearWidgets()
-        
-        if successes:
-            msg = f"Successfully converted {len(successes)} of {total_files} files."
-            
-            if errors:
-                msg += " Some files had errors."
-                self.iface.messageBar().pushWarning("ArcToQ", msg)
-            else:
-                self.iface.messageBar().pushSuccess("ArcToQ", msg)
-                
-            if renamed_files:
-                rename_msg = "\n".join(renamed_files)
-                QMessageBox.information(
-                    self.iface.mainWindow(), 
-                    "Files Renamed", 
-                    f"To prevent overwriting existing files or duplicate names, the following QLRs were automatically renamed:\n\n{rename_msg}"
-                )
-                
-            reply = QMessageBox.question(
-                self.iface.mainWindow(), 
-                "Batch Conversion Complete", 
-                f"{msg}\n\nWould you like to load the successfully converted QLRs into the current project?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
-            )
-            
-            if reply == QMessageBox.Yes:
-                for qlr in successes:
-                    QgsLayerDefinition.loadLayerDefinition(
-                        qlr, 
-                        QgsProject.instance(), 
-                        QgsProject.instance().layerTreeRoot()
-                    )
-            
-            dialog.accept()
-                    
-        if errors:
-            err_msg = "\n".join(errors)
-            QMessageBox.warning(
-                self.iface.mainWindow(), 
-                "Batch Conversion Notice", 
-                f"The following files were not converted:\n\n{err_msg}"
-            )
+        dialog._start_batch(
+            files_to_convert, out_dir, save_in_place, mirror_structure,
+            allow_overwrite, common_base, len(files_to_convert)
+        )

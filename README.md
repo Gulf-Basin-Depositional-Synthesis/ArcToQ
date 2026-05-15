@@ -17,7 +17,7 @@ This project is in its early stages, so don't expect working code of files that 
 The following are not currently supported. Consider supporting development or contributing to the codebase.
  
 **File Formats**
-- `.aprx` project files — only `.lyrx` layer files are supported
+- `.aprx` project files, only `.lyrx` layer files are supported
 - `.lyr` (legacy ArcMap layer files)
 
 **Layer Types**
