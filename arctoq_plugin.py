@@ -230,13 +230,13 @@ class ConvertDialog(QDialog):
         # Using a variable for backticks prevents the chat window from breaking the code block
         code_block = "```"
         
-        body = "**Describe the bug**\n"
+        body = "**Describe the issue**\n"
         body += f"Failed to convert `{file_name}`.\n\n"
+        body += "More Details:\n"
         body += "Error trace:\n"
         body += f"{code_block}python\n"
         body += f"{error_msg}\n"
         body += f"{code_block}\n\n"
-        body += "More Details\n"
         body += "**To Reproduce**\n"
         body += "Steps to reproduce the behavior:\n"
         body += f"1. Attempt to convert `{file_name}` using ArcToQ.\n"
