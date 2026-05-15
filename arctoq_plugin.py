@@ -116,7 +116,6 @@ class ConvertDialog(QDialog):
         self.tabs.addTab(self.batch_tab, "Batch Process")
 
         # --- TAB 3: Jobs (History) ---
-        self.history_tree.itemDoubleClicked.connect(self.show_item_details)
         self.jobs_tab = QWidget()
         self.jobs_layout = QVBoxLayout(self.jobs_tab)
         
@@ -124,6 +123,8 @@ class ConvertDialog(QDialog):
         self.history_tree.setHeaderLabels(["Date/Time", "Job / File", "Status", "Details"])
         self.history_tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
         self.history_tree.setWordWrap(True) 
+        
+        self.history_tree.itemDoubleClicked.connect(self.show_item_details)
         
         self.jobs_layout.addWidget(self.history_tree)
 
