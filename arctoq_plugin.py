@@ -106,6 +106,7 @@ class BatchWorker(QThread):
                 self.progress.emit(index + 1)
 
         finally:
+            print("emitting finished signal")
             self.finished.emit()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
