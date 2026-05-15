@@ -188,6 +188,8 @@ def _resolve_filegdb_layer_name(gdb_path: str, requested_name: str) -> str:
         return requested_name
 
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
+    print(f"[MAKE_URIS] conn_str={repr(conn_str)}, factory={repr(factory)}, dataset={repr(dataset)}, dataset_type={repr(dataset_type)}")
+    print(f"[MAKE_URIS] in_folder={repr(in_folder)}")
     """Helper to build absolute/relative URIs and determine provider type."""
  
     # --- Handle Web Feature Services ---
