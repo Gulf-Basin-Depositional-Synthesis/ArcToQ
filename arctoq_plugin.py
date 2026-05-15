@@ -287,6 +287,7 @@ class ConvertDialog(QDialog):
             job["files"].append({"input": input_path, "output": "", "status": "Failed", "error": error})
 
     def _on_batch_finished(self):
+        print("_on_batch_finished called")
         self.run_btn.setVisible(True)
         self.cancel_btn.setVisible(False)
         self.cancel_btn.setEnabled(True)
@@ -298,9 +299,11 @@ class ConvertDialog(QDialog):
         self.append_job_to_history({k: v for k, v in job.items() if k not in ("successes", "errors")})
 
         from qgis.PyQt.QtCore import QTimer
+        print("about to call QTimer")
         QTimer.singleShot(0, self._show_batch_summary)
 
     def _show_batch_summary(self):
+        print("_show_batch_summary called")
         job = self._batch_job_data
         if not job:
             return
@@ -339,6 +342,7 @@ class ConvertDialog(QDialog):
 
         self._worker = None
         self._batch_job_data = None
+        print("_show_batch_summary done")
 
     def _set_batch_controls_enabled(self, enabled):
         for widget in [self.add_files_btn, self.add_folder_btn, self.remove_files_btn,
