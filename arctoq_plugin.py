@@ -2,12 +2,15 @@ import sys
 import os
 import tempfile
 import shutil
-from qgis.PyQt.QtCore import Qt, QEventLoop
-from qgis.PyQt.QtGui import QIcon  
+import json
+from datetime import datetime
+from qgis.PyQt.QtCore import Qt, QEventLoop, QUrl
+from qgis.PyQt.QtGui import QIcon, QDesktopServices
 from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, 
                                  QLabel, QPushButton, QTabWidget, QWidget, 
                                  QMessageBox, QAction, QApplication,
-                                 QFileDialog, QListWidget, QProgressBar, QCheckBox)
+                                 QFileDialog, QListWidget, QProgressBar, QCheckBox,
+                                 QTreeWidget, QTreeWidgetItem, QHeaderView)
 from qgis.gui import QgsFileWidget
 from qgis.core import QgsApplication, QgsProject, QgsLayerDefinition, QgsTask, Qgis
 
@@ -24,7 +27,7 @@ class ConvertDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Convert LYRX to QLR")
-        self.resize(550, 580) # Slightly taller to fit new checkbox
+        self.resize(650, 600) # Slightly larger to accommodate the history tree
         
         # Main Layout
         layout = QVBoxLayout(self)
@@ -107,6 +110,25 @@ class ConvertDialog(QDialog):
         self.batch_layout.addWidget(self.progress_bar)
         
         self.tabs.addTab(self.batch_tab, "Batch Process")
+
+        # --- TAB 3: Jobs (History) ---
+        self.jobs_tab = QWidget()
+        self.jobs_layout = QVBoxLayout(self.jobs_tab)
+        
+        self.history_tree = QTreeWidget()
+        self.history_tree.setHeaderLabels(["Date/Time", "Job / File", "Status", "Details"])
+        self.history_tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.jobs_layout.addWidget(self.history_tree)
+
+        jobs_btn_layout = QHBoxLayout()
+        self.open_dest_btn = QPushButton("Open Destination Folder")
+        self.clear_history_btn = QPushButton("Clear History")
+        jobs_btn_layout.addWidget(self.open_dest_btn)
+        jobs_btn_layout.addStretch()
+        jobs_btn_layout.addWidget(self.clear_history_btn)
+        self.jobs_layout.addLayout(jobs_btn_layout)
+
+        self.tabs.addTab(self.jobs_tab, "Jobs")
         
         layout.addWidget(self.tabs)
         
@@ -130,6 +152,117 @@ class ConvertDialog(QDialog):
         self.remove_files_btn.clicked.connect(self.remove_batch_files)
         self.clear_files_btn.clicked.connect(self.file_list.clear)
         self.save_in_place_cb.toggled.connect(self.on_save_in_place_toggled)
+
+        # Jobs tab connections
+        self.open_dest_btn.clicked.connect(self.open_destination)
+        self.clear_history_btn.clicked.connect(self.clear_history)
+
+        # Load history on startup
+        self.history_file = os.path.join(QgsApplication.qgisSettingsDirPath(), "arctoq_history.json")
+        self.load_history()
+
+    # --- History / Jobs Methods ---
+
+    def load_history(self):
+        self.history_tree.clear()
+        if not os.path.exists(self.history_file):
+            return
+
+        try:
+            with open(self.history_file, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+        except Exception:
+            history = []
+
+        # Load in reverse so newest is on top
+        for job in reversed(history):
+            job_item = QTreeWidgetItem(self.history_tree)
+            job_item.setText(0, job.get("timestamp", ""))
+            
+            j_type = job.get("type", "Unknown")
+            total = job.get("total", 0)
+            success = job.get("success", 0)
+            
+            job_item.setText(1, f"{j_type} ({total} files)")
+            
+            if success == total and total > 0:
+                job_item.setText(2, "Success")
+                job_item.setForeground(2, Qt.darkGreen)
+            elif success == 0:
+                job_item.setText(2, "Failed")
+                job_item.setForeground(2, Qt.red)
+            else:
+                job_item.setText(2, "Partial Success")
+                job_item.setForeground(2, Qt.darkYellow)
+                
+            job_item.setText(3, f"{success} Success, {total - success} Failed")
+
+            # Child file items
+            for f_data in job.get("files", []):
+                file_item = QTreeWidgetItem(job_item)
+                file_item.setText(1, os.path.basename(f_data.get("input", "")))
+                
+                f_status = f_data.get("status", "")
+                file_item.setText(2, f_status)
+                if f_status == "Success":
+                    file_item.setForeground(2, Qt.darkGreen)
+                    file_item.setData(0, Qt.UserRole, f_data.get("output", "")) # Store path for easy opening
+                    file_item.setText(3, os.path.dirname(f_data.get("output", "")))
+                else:
+                    file_item.setForeground(2, Qt.red)
+                    file_item.setText(3, f_data.get("error", ""))
+
+    def append_job_to_history(self, job_data):
+        history = []
+        if os.path.exists(self.history_file):
+            try:
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    history = json.load(f)
+            except Exception:
+                pass
+        
+        history.append(job_data)
+        
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=4)
+            self.load_history()
+        except Exception as e:
+            print(f"Failed to write history: {e}")
+
+    def clear_history(self):
+        reply = QMessageBox.question(self, "Clear History", "Are you sure you want to clear the entire job history?", QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            if os.path.exists(self.history_file):
+                os.remove(self.history_file)
+            self.load_history()
+
+    def open_destination(self):
+        selected = self.history_tree.selectedItems()
+        if not selected:
+            return
+
+        item = selected[0]
+        path_to_open = None
+
+        # Check if it's a file item (child)
+        if item.parent() is not None:
+            path_to_open = item.data(0, Qt.UserRole)
+        # Check if it's a job item (parent)
+        else:
+            for i in range(item.childCount()):
+                child = item.child(i)
+                if child.data(0, Qt.UserRole):
+                    path_to_open = child.data(0, Qt.UserRole)
+                    break
+        
+        if path_to_open and os.path.exists(os.path.dirname(path_to_open)):
+            dir_path = os.path.dirname(path_to_open)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(dir_path))
+        else:
+            QMessageBox.information(self, "Not Found", "The destination folder could not be found or no files succeeded in this job.")
+
+    # --- General Tab Methods ---
 
     def on_save_in_place_toggled(self, checked):
         # Disable Destination elements if Save In Place is active
@@ -251,6 +384,13 @@ class ArcToQPlugin:
             self.iface.messageBar().pushWarning("ArcToQ", "Input and Output paths must be defined.")
             return
             
+        job_data = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "type": "Single",
+            "total": 1,
+            "files": []
+        }
+
         try:
             self.iface.messageBar().clearWidgets()
             self.iface.messageBar().pushInfo("ArcToQ", f"Converting {os.path.basename(lyrx_path)}...")
@@ -266,11 +406,17 @@ class ArcToQPlugin:
                     if os.path.exists(out_file):
                         os.remove(out_file) 
                     shutil.move(temp_generated_file, out_file)
+                    
+                    job_data["success"] = 1
+                    job_data["files"].append({
+                        "input": lyrx_path, "output": out_file, "status": "Success", "error": ""
+                    })
                 else:
                     raise Exception("Conversion process finished but no file was generated.")
             
             self.iface.messageBar().clearWidgets()
             self.iface.messageBar().pushSuccess("ArcToQ", "Conversion successful!")
+            dialog.append_job_to_history(job_data)
             
             reply = QMessageBox.question(
                 self.iface.mainWindow(), 
@@ -290,6 +436,12 @@ class ArcToQPlugin:
             dialog.accept()
             
         except Exception as e:
+            job_data["success"] = 0
+            job_data["files"].append({
+                "input": lyrx_path, "output": "", "status": "Failed", "error": str(e)
+            })
+            dialog.append_job_to_history(job_data)
+
             self.iface.messageBar().clearWidgets()
             self.iface.messageBar().pushCritical("ArcToQ", f"Conversion failed: {str(e)}")
             QMessageBox.critical(
@@ -327,6 +479,14 @@ class ArcToQPlugin:
 
         total_files = len(files_to_convert)
         
+        job_data = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "type": "Batch",
+            "total": total_files,
+            "success": 0,
+            "files": []
+        }
+        
         dialog.progress_bar.setMaximum(total_files)
         dialog.progress_bar.setValue(0)
 
@@ -349,10 +509,9 @@ class ArcToQPlugin:
                 if save_in_place:
                     current_out_dir = os.path.dirname(lyrx_path)
                 elif mirror_structure and common_base:
-                    # Calculate its relative place and append it to the chosen destination output
                     rel_path = os.path.relpath(os.path.dirname(lyrx_path), common_base)
                     current_out_dir = os.path.join(out_dir, rel_path) if rel_path != '.' else out_dir
-                    os.makedirs(current_out_dir, exist_ok=True) # Dynamically generate the folder tree!
+                    os.makedirs(current_out_dir, exist_ok=True) 
                 else:
                     current_out_dir = out_dir
                 
@@ -383,10 +542,18 @@ class ArcToQPlugin:
                             os.remove(out_file)
                         shutil.move(temp_generated_file, out_file)
                         successes.append(out_file)
+                        
+                        job_data["files"].append({
+                            "input": lyrx_path, "output": out_file, "status": "Success", "error": ""
+                        })
+                        job_data["success"] += 1
                     else:
-                        errors.append(f"{base_name}: No output file generated.")
+                        raise Exception("No output file generated.")
                 except Exception as e:
                     errors.append(f"{base_name}: {str(e)}")
+                    job_data["files"].append({
+                        "input": lyrx_path, "output": "", "status": "Failed", "error": str(e)
+                    })
                     temp_generated_file = os.path.join(temp_dir, base_name.replace(".lyrx", ".qlr"))
                     if os.path.exists(temp_generated_file):
                         try:
@@ -396,6 +563,9 @@ class ArcToQPlugin:
                             
                 dialog.progress_bar.setValue(index + 1)
                 QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+
+        # Save Job history
+        dialog.append_job_to_history(job_data)
 
         self.iface.messageBar().clearWidgets()
         
