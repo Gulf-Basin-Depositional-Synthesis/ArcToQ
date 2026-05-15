@@ -152,20 +152,8 @@ def _parse_xml_dataconnection(xml_string: str) -> dict | None:
     return None
 
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
-    """Helper to build absolute/relative URIs and determine provider type.
-    
-    Args:
-        in_folder (str): Path to the folder containing the .lyrx file.
-        conn_str (str): The workspace connection string from the .lyrx file.
-        factory (str): The workspace factory type (e.g. "FileGDB", "Shapefile").
-        dataset (str): The dataset name (e.g. feature class or table name).
-        dataset_type (str): The dataset type (e.g. "esriDTRasterDataset", "esriDTFeatureClass").
-        def_query (str): The definition query string to append to the URI (or empty string).
-            The query should already be in QGIS-compatible format, including the leading "|subset=".
-        out_file (str): Path to the converted QGIS .qlr file.
-    Returns:
-        tuple: (abs_uri, rel_uri, provider)
-    """
+    """Helper to build absolute/relative URIs and determine provider type."""
+ 
     # --- Handle Web Feature Services ---
     if factory == "FeatureService":
         url = conn_str.replace("URL=", "").strip()
@@ -174,83 +162,74 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
         ds_uri.setParam("url", base_url)
         uri = ds_uri.uri()
         return uri, uri, "arcgisfeatureserver"
-
+ 
     # --- Handle Local / Network Files ---
     if "=" in conn_str:
         _, raw_path = conn_str.split("=", 1)
     else:
         raw_path = conn_str
-
+ 
     # Normalize dataset slashes — LYRX JSON may use backslashes
-    # (e.g. "tif\FrioFeldsparContent.tif")
     dataset = dataset.replace("\\", "/")
-
+ 
+    # Normalise raw_path backslashes so Path() can parse it on any OS
+    raw_path = raw_path.replace("\\", "/")
+ 
+    # Determine whether this is a raster dataset.
+    # ArcGIS sometimes writes "esriDTAny" instead of "esriDTRasterDataset"
+    # when the workspace factory is "Raster", so we treat both as raster.
+    is_raster = (
+        dataset_type == "esriDTRasterDataset"
+        or dataset_type == "esriDTAny"
+        or factory == "Raster"
+    )
+ 
     lyrx_dir = Path(in_folder)
-
-    # --- Path resolution strategy ---
-    # We intentionally avoid Path.resolve() here for raster (GDAL) paths.
-    #
-    # resolve() expands mapped drive letters to their UNC equivalents, e.g.:
-    #   G:\Current_Database\... -> \\utig5.ig.utexas.edu\gbds\Current_Database\...
-    #
-    # GDAL on Windows can open G:\... directly but frequently fails on the
-    # expanded \\server.fqdn\share\... form, especially with spaces in the path.
-    # Keeping the mapped drive letter is both shorter and more reliable for GDAL.
-    #
-    # For non-raster (OGR) paths we still resolve so that relative paths in the
-    # LYRX (e.g. "../data/layer.gdb") are made absolute correctly.
-
-    if dataset_type == "esriDTRasterDataset":
-        # Use os.path.abspath instead of resolve() — it makes relative paths
-        # absolute using the current working directory arithmetic WITHOUT
-        # following symlinks or expanding drive mappings to UNC.
-        abs_path_str = os.path.abspath(os.path.join(str(lyrx_dir), raw_path))
+ 
+    if is_raster:
+        # For rasters we use os.path.abspath() instead of Path.resolve().
+        # resolve() follows the OS drive mapping and expands e.g. G:\ or a
+        # relative UNC path to the full \\server.fqdn\share\... form, which
+        # GDAL on Windows often cannot open (especially with spaces in the path).
+        # abspath() just does string arithmetic and leaves drive letters intact.
+        abs_path_str = os.path.normpath(
+            os.path.abspath(os.path.join(str(lyrx_dir), raw_path))
+        )
         abs_path = Path(abs_path_str)
+        # Keep native OS separators for GDAL (backslashes on Windows)
+        abs_posix = abs_path_str
+        sep = os.sep
+        provider = "gdal"
     else:
         abs_path = (lyrx_dir / raw_path).resolve()
-        abs_path_str = str(abs_path)
-
-    # For non-raster paths use posix separators (works fine for OGR/local).
-    # For raster paths keep the native OS separators so GDAL sees exactly what
-    # the filesystem uses (backslashes on Windows, forward slashes on Mac/Linux).
-    if dataset_type == "esriDTRasterDataset":
-        abs_posix = abs_path_str  # native separators preserved
-    else:
         abs_posix = abs_path.as_posix()
-
-    provider = "ogr"
-    # Use the OS separator only for raster URI construction so the full path
-    # passed to GDAL matches what the OS expects.
-    sep = os.sep if dataset_type == "esriDTRasterDataset" else "/"
-
+        sep = "/"
+        provider = "ogr"
+ 
     # --- Build absolute URI ---
     if factory == "FileGDB":
         if dataset_type in ("esriDTFeatureClass", "esriDTTable"):
             abs_uri = f"{abs_posix}|layername={dataset}"
-        elif dataset_type == "esriDTRasterDataset":
+        elif is_raster:
             abs_uri = abs_posix + sep + dataset.replace("/", sep)
-            provider = "gdal"
         else:
             raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
         abs_uri = abs_posix + sep + dataset.replace("/", sep)
-        if dataset_type == "esriDTRasterDataset":
-            provider = "gdal"
-
+ 
     # --- Build relative URI ---
-    # Relative URIs are used as a fallback when QGIS loads the QLR on another
-    # machine. Forward slashes are fine here regardless of platform.
+    # Forward slashes are fine for the relative URI regardless of platform.
     # os.path.relpath raises ValueError when source and destination are on
-    # different drives (e.g. G:\ vs C:\) — fall back to the absolute URI.
+    # different drives — fall back to absolute URI in that case.
     try:
         out_dir = Path(out_file).parent.resolve()
         rel_path = Path(os.path.relpath(abs_path, start=out_dir))
         rel_posix = rel_path.as_posix()
-
+ 
         if factory == "FileGDB":
             if dataset_type in ("esriDTFeatureClass", "esriDTTable"):
                 rel_uri = f"{rel_posix}|layername={dataset}"
-            elif dataset_type == "esriDTRasterDataset":
+            elif is_raster:
                 rel_uri = f"{rel_posix}/{dataset}"
             else:
                 raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
@@ -258,7 +237,7 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
             rel_uri = f"{rel_posix}/{dataset}"
     except ValueError:
         rel_uri = abs_uri
-
+ 
     # --- Shapefile extension and definition query ---
     if dataset_type == "esriDTFeatureClass":
         if factory == "Shapefile":
@@ -266,11 +245,11 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
                 abs_uri += ".shp"
             if not rel_uri.lower().endswith(".shp"):
                 rel_uri += ".shp"
-
+ 
         if def_query:
             abs_uri += def_query
             rel_uri += def_query
-
+ 
     return abs_uri, rel_uri, provider
 
 def _parse_source(in_folder, data_connection, def_query, out_file):
@@ -598,6 +577,15 @@ def _convert_raster_layer(in_folder, layer_def, out_file, project):
         raise RuntimeError(f"Unexpected data_connection type: {type(data_connection)} for layer {layer_name}")
 
     data_connection = {k[0].lower() + k[1:]: v for k, v in data_connection.items()}
+ 
+    # Normalise esriDTAny -> esriDTRasterDataset so _make_uris and
+    # _parse_source always treat this connection as a raster.
+    if data_connection.get("datasetType") in ("esriDTAny", None):
+        data_connection["datasetType"] = "esriDTRasterDataset"
+ 
+    # If workspaceFactory is missing or empty, default to "Raster"
+    if not data_connection.get("workspaceFactory"):
+        data_connection["workspaceFactory"] = "Raster"
 
     # Unpack the new 3-item tuple (abs, rel, provider), ignoring provider for now as we default to gdal
     (abs_uri, rel_uri, provider), _ = _parse_source(in_folder, data_connection, "", out_file)
