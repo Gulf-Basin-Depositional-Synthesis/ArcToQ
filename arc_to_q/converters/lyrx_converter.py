@@ -152,6 +152,12 @@ def _parse_xml_dataconnection(xml_string: str) -> dict | None:
     return None
 
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
+    from osgeo import ogr
+    ds = ogr.Open("G:/Current_Database/Projects/Mesozoic Grain Volumes/MesoGV.gdb")
+    if ds:
+        for i in range(ds.GetLayerCount()):
+            print(f"  Layer {i}: {ds.GetLayer(i).GetName()}")
+
     """Helper to build absolute/relative URIs and determine provider type."""
  
     # --- Handle Web Feature Services ---
