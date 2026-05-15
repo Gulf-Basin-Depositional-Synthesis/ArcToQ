@@ -9,6 +9,8 @@ assignees: ''
 **Describe the bug**
 What went wrong?
 
+**More Details**
+
 **To Reproduce**
 Steps to reproduce the behavior:
 1. 
