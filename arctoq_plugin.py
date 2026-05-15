@@ -297,13 +297,17 @@ class ConvertDialog(QDialog):
         job = self._batch_job_data
         self.append_job_to_history({k: v for k, v in job.items() if k not in ("successes", "errors")})
 
+        from qgis.PyQt.QtCore import QTimer
+        QTimer.singleShot(0, self._show_batch_summary)
+
+    def _show_batch_summary(self):
+        job = self._batch_job_data
+        if not job:
+            return
+
         successes = job["successes"]
         errors = job["errors"]
         total = job["total"]
-
-        if not successes and not errors:
-            # Cancelled before any files processed
-            return
 
         if successes:
             msg = f"Successfully converted {len(successes)} of {total} files."
