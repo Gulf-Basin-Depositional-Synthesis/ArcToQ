@@ -207,12 +207,12 @@ class ConvertDialog(QDialog):
         # If this is a child item (a file) and it failed, show the report button
         if item.parent() is not None and item.text(2) == "Failed":
             report_btn = QPushButton("Report Bug on GitHub")
-            report_btn.setStyleSheet("background-color: #2ea44f; color: white; font-weight: bold;") # Give it a GitHub green style
+            report_btn.setStyleSheet("background-color: #2ea44f; color: white; font-weight: bold;")
             
-            # Grab the filename and error message specifically
             file_name = item.text(1)
             error_msg = item.text(3)
-            report_btn.clicked.connect(lambda: self.report_to_github(file_name, error_msg))
+            # Use default arguments in lambda to lock in the variable values
+            report_btn.clicked.connect(lambda checked=False, f=file_name, e=error_msg: self.report_to_github(f, e))
             btn_layout.addWidget(report_btn)
         
         close_btn = QPushButton("Close")
@@ -227,11 +227,33 @@ class ConvertDialog(QDialog):
         os_info = f"{platform.system()} {platform.release()}"
         qgis_ver = Qgis.QGIS_VERSION
         
-        body = f"""**Describe the bug**
-Failed to convert `{file_name}`. 
-Error trace:
-```python
-{error_msg}
+        # Using a variable for backticks prevents the chat window from breaking the code block
+        code_block = "```"
+        
+        body = "**Describe the bug**\n"
+        body += f"Failed to convert `{file_name}`.\n\n"
+        body += "Error trace:\n"
+        body += f"{code_block}python\n"
+        body += f"{error_msg}\n"
+        body += f"{code_block}\n\n"
+        body += "**To Reproduce**\n"
+        body += "Steps to reproduce the behavior:\n"
+        body += f"1. Attempt to convert `{file_name}` using ArcToQ.\n"
+        body += "2. Conversion fails with the error above.\n\n"
+        body += "**Environment:**\n"
+        body += f" - OS: {os_info}\n"
+        body += f" - QGIS Version: {qgis_ver}\n"
+        body += " - ArcGIS Pro Version (if known): \n\n"
+        body += "**Attachments**\n"
+        body += f"Please drop the problematic `{file_name}` file and any relevant screenshots here.\n"
+        
+        # URL encode the title and body so they can be passed safely in a web link
+        title = urllib.parse.quote(f"[Bug] Conversion failed for {file_name}")
+        body_encoded = urllib.parse.quote(body)
+        
+        url = f"https://github.com/Gulf-Basin-Depositional-Synthesis/ArcToQ/issues/new?labels=bug&title={title}&body={body_encoded}"
+        
+        QDesktopServices.openUrl(QUrl(url))
 
     def load_history(self):
         self.history_tree.clear()
