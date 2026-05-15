@@ -172,19 +172,24 @@ def _resolve_filegdb_layer_name(gdb_path: str, requested_name: str) -> str:
     """
     try:
         from osgeo import ogr
-        ds = ogr.Open(gdb_path, 0)  # 0 = read-only, no risk to the GDB
+        ds = ogr.Open(gdb_path, 0)
         if ds is None:
+            print(f"[GDB] Could not open: {gdb_path}")
             return requested_name
- 
+
+        print(f"[GDB] Opened OK, {ds.GetLayerCount()} layers:")
         requested_lower = requested_name.lower()
         for i in range(ds.GetLayerCount()):
             name = ds.GetLayer(i).GetName()
+            print(f"[GDB]   {i}: {repr(name)}")
             if name.lower() == requested_lower:
-                return name  # found exact OGR name
- 
-        # Not found — return original and let OGR surface the real error
+                print(f"[GDB] Matched '{requested_name}' -> '{name}'")
+                return name
+
+        print(f"[GDB] No match found for '{requested_name}'")
         return requested_name
-    except Exception:
+    except Exception as e:
+        print(f"[GDB] Exception: {e}")
         return requested_name
 
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
