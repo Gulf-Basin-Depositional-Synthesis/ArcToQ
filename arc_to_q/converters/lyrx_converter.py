@@ -681,6 +681,8 @@ def _convert_group_layer(in_folder, group_layer_def, lyrx_json, out_file, projec
 def convert_lyrx(in_lyrx, out_folder=None, qgs=None):
     """Convert an ArcGIS Pro .lyrx file to a QGIS .qlr file"""
     print(f"Converting {in_lyrx}...")
+    print(f"[DEBUG] in_lyrx = {repr(in_lyrx)}")
+    print(f"[DEBUG] out_folder = {repr(out_folder)}")
     if not out_folder:
         out_folder = os.path.dirname(in_lyrx)
     in_folder = os.path.abspath(os.path.dirname(in_lyrx))
