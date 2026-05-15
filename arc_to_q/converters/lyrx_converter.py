@@ -244,6 +244,7 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
     # or drive mappings.
     lyrx_dir = str(Path(in_folder))
     abs_path_str = os.path.normpath(os.path.join(lyrx_dir, raw_path))
+    print(f"[MAKE_URIS] abs_path_str={repr(abs_path_str)}")
     abs_path = Path(abs_path_str)
  
     if is_raster:
