@@ -62,6 +62,9 @@ class ConvertDialog(QDialog):
         
         self.batch_layout.addWidget(QLabel("Select LYRX files to convert:"))
         self.file_list = QListWidget()
+        
+        self.file_list.setSelectionMode(QListWidget.ExtendedSelection) 
+        
         self.batch_layout.addWidget(self.file_list)
         
         # Buttons to manage the batch list (Files & Folders)
