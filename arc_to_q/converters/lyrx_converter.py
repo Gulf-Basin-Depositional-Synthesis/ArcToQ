@@ -164,9 +164,6 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
             The query should already be in QGIS-compatible format, including the leading "|subset=".
         out_file (str): Path to the converted QGIS .qlr file.
     Returns:
-        tuple: (abs_uri, rel_uri)
-          - abs_uri: Absolute QGIS URI for the dataset
-          - rel_uri: Relative QGIS URI for the dataset
         tuple: (abs_uri, rel_uri, provider)
     """
     # --- Handle Web Feature Services ---
@@ -178,71 +175,89 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
         uri = ds_uri.uri()
         return uri, uri, "arcgisfeatureserver"
 
-    # --- Handle Local Files ---
+    # --- Handle Local / Network Files ---
     if "=" in conn_str:
         _, raw_path = conn_str.split("=", 1)
     else:
         raw_path = conn_str
 
-    # Normalize dataset slashes immediately — the value from the LYRX JSON
-    # may contain backslashes (e.g. "tif\FrioFeldsparContent.tif")
+    # Normalize dataset slashes — LYRX JSON may use backslashes
+    # (e.g. "tif\FrioFeldsparContent.tif")
     dataset = dataset.replace("\\", "/")
 
     lyrx_dir = Path(in_folder)
-    abs_path = (lyrx_dir / raw_path).resolve()
 
-    # --- UNC path handling ---
-    # UNC paths (\\server\share\...) must keep backslashes for GDAL on Windows.
-    # as_posix() converts them to //server/share/... which GDAL cannot open.
-    # We detect UNC by checking if the drive component starts with '\\'.
-    is_unc = str(abs_path).startswith("\\\\") or (
-        hasattr(abs_path, 'drive') and abs_path.drive.startswith("\\\\")
-    )
-    if is_unc:
-        abs_posix = str(abs_path)          # keep native backslashes for GDAL
+    # --- Path resolution strategy ---
+    # We intentionally avoid Path.resolve() here for raster (GDAL) paths.
+    #
+    # resolve() expands mapped drive letters to their UNC equivalents, e.g.:
+    #   G:\Current_Database\... -> \\utig5.ig.utexas.edu\gbds\Current_Database\...
+    #
+    # GDAL on Windows can open G:\... directly but frequently fails on the
+    # expanded \\server.fqdn\share\... form, especially with spaces in the path.
+    # Keeping the mapped drive letter is both shorter and more reliable for GDAL.
+    #
+    # For non-raster (OGR) paths we still resolve so that relative paths in the
+    # LYRX (e.g. "../data/layer.gdb") are made absolute correctly.
+
+    if dataset_type == "esriDTRasterDataset":
+        # Use os.path.abspath instead of resolve() — it makes relative paths
+        # absolute using the current working directory arithmetic WITHOUT
+        # following symlinks or expanding drive mappings to UNC.
+        abs_path_str = os.path.abspath(os.path.join(str(lyrx_dir), raw_path))
+        abs_path = Path(abs_path_str)
     else:
-        abs_posix = abs_path.as_posix()    # forward slashes fine for local paths
+        abs_path = (lyrx_dir / raw_path).resolve()
+        abs_path_str = str(abs_path)
+
+    # For non-raster paths use posix separators (works fine for OGR/local).
+    # For raster paths keep the native OS separators so GDAL sees exactly what
+    # the filesystem uses (backslashes on Windows, forward slashes on Mac/Linux).
+    if dataset_type == "esriDTRasterDataset":
+        abs_posix = abs_path_str  # native separators preserved
+    else:
+        abs_posix = abs_path.as_posix()
 
     provider = "ogr"
+    # Use the OS separator only for raster URI construction so the full path
+    # passed to GDAL matches what the OS expects.
+    sep = os.sep if dataset_type == "esriDTRasterDataset" else "/"
 
-    # --- Absolute URI ---
+    # --- Build absolute URI ---
     if factory == "FileGDB":
         if dataset_type in ("esriDTFeatureClass", "esriDTTable"):
             abs_uri = f"{abs_posix}|layername={dataset}"
         elif dataset_type == "esriDTRasterDataset":
-            sep = "\\" if is_unc else "/"
-            abs_uri = f"{abs_posix}{sep}{dataset}"
+            abs_uri = abs_posix + sep + dataset.replace("/", sep)
             provider = "gdal"
         else:
             raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
     else:
-        sep = "\\" if is_unc else "/"
-        abs_uri = f"{abs_posix}{sep}{dataset}"
+        abs_uri = abs_posix + sep + dataset.replace("/", sep)
         if dataset_type == "esriDTRasterDataset":
             provider = "gdal"
 
-    # --- Relative URI ---
-    # Relative paths are only used as a fallback for local layers in QGIS,
-    # so we always use forward slashes here regardless of UNC status.
-    out_dir = Path(out_file).parent.resolve()
+    # --- Build relative URI ---
+    # Relative URIs are used as a fallback when QGIS loads the QLR on another
+    # machine. Forward slashes are fine here regardless of platform.
+    # os.path.relpath raises ValueError when source and destination are on
+    # different drives (e.g. G:\ vs C:\) — fall back to the absolute URI.
     try:
+        out_dir = Path(out_file).parent.resolve()
         rel_path = Path(os.path.relpath(abs_path, start=out_dir))
-    except ValueError:
-        # os.path.relpath raises ValueError when paths are on different drives (Windows).
-        # This always happens with UNC paths vs a local out_dir, so fall back to absolute.
-        rel_path = abs_path
+        rel_posix = rel_path.as_posix()
 
-    rel_posix = rel_path.as_posix()
-
-    if factory == "FileGDB":
-        if dataset_type in ("esriDTFeatureClass", "esriDTTable"):
-            rel_uri = f"{rel_posix}|layername={dataset}"
-        elif dataset_type == "esriDTRasterDataset":
-            rel_uri = f"{rel_posix}/{dataset}"
+        if factory == "FileGDB":
+            if dataset_type in ("esriDTFeatureClass", "esriDTTable"):
+                rel_uri = f"{rel_posix}|layername={dataset}"
+            elif dataset_type == "esriDTRasterDataset":
+                rel_uri = f"{rel_posix}/{dataset}"
+            else:
+                raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
         else:
-            raise NotImplementedError(f"Unsupported FileGDB dataset type: {dataset_type}")
-    else:
-        rel_uri = f"{rel_posix}/{dataset}"
+            rel_uri = f"{rel_posix}/{dataset}"
+    except ValueError:
+        rel_uri = abs_uri
 
     # --- Shapefile extension and definition query ---
     if dataset_type == "esriDTFeatureClass":
