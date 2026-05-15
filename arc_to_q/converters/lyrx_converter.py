@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import io
 import tempfile
+import html
 
 from qgis.core import (
     QgsApplication,
@@ -100,7 +101,7 @@ def _parse_xml_dataconnection(xml_string: str) -> dict | None:
     dataset_match = re.search(r"<Dataset>([^<]+)</Dataset>", xml_string)
     if ws_match and dataset_match:
         path = ws_match.group(1).strip().rstrip(';')
-        dataset = dataset_match.group(1).strip()
+        dataset = html.unescape(dataset_match.group(1).strip())
         return {
             "workspaceConnectionString": f"DATABASE={path}",
             "dataset": dataset,
@@ -120,7 +121,7 @@ def _parse_xml_dataconnection(xml_string: str) -> dict | None:
         )
         if path_match and raster_section_match:
             path = path_match.group(1).strip()
-            dataset = raster_section_match.group(1).strip()
+            dataset = html.unescape(raster_section_match.group(1).strip())
             return {
                 "workspaceConnectionString": f"DATABASE={path}",
                 "dataset": dataset,
@@ -137,7 +138,7 @@ def _parse_xml_dataconnection(xml_string: str) -> dict | None:
         if not any(word in name.lower() for word in ['function', 'geometric', 'transform']):
             # Check if it looks like a filename (has a common image extension).
             if '.' in name and any(name.lower().endswith(ext) for ext in ['.png', '.tif', '.tiff', '.jpg', '.jpeg', '.img', '.sid', '.ecw']):
-                dataset = name.strip()
+                dataset = html.unescape(name.strip())
                 break # Found a suitable dataset name
 
     if path_match and dataset:
@@ -159,9 +160,8 @@ def _resolve_filegdb_layer_name(gdb_path: str, requested_name: str) -> str:
     opens the GDB read-only and finds the layer whose name matches
     case-insensitively, returning the name exactly as OGR sees it.
  
-    If the GDB cannot be opened (e.g. CDF compression, permissions) or the
-    layer is not found, the original requested_name is returned unchanged so
-    the caller can still attempt to load and surface a meaningful error.
+    If the GDB contains CDF-compressed layers that OGR cannot read, a clear
+    CdfCompressedGdbError is raised with instructions for the user.
  
     Args:
         gdb_path: Absolute path to the .gdb directory.
@@ -169,28 +169,100 @@ def _resolve_filegdb_layer_name(gdb_path: str, requested_name: str) -> str:
  
     Returns:
         The OGR-correct layer name, or requested_name if not resolvable.
+ 
+    Raises:
+        CdfCompressedGdbError: If the layer is missing due to CDF compression.
     """
     try:
-        from osgeo import ogr
-        ds = ogr.Open(gdb_path, 0)
+        from osgeo import ogr, gdal
+ 
+        # Capture GDAL warnings so we can detect the CDF message
+        gdal.UseExceptions()
+        warnings = []
+ 
+        class _WarningHandler:
+            def __init__(self):
+                self.messages = []
+            def handler(self, err_class, err_num, message):
+                self.messages.append(message)
+ 
+        warning_handler = _WarningHandler()
+        gdal.PushErrorHandler(warning_handler.handler)
+ 
+        try:
+            ds = ogr.Open(gdb_path, 0)  # 0 = read-only, no risk to the GDB
+        finally:
+            gdal.PopErrorHandler()
+ 
+        gdal_warnings = " ".join(warning_handler.messages)
+        cdf_detected = (
+            "Compressed Data Format" in gdal_warnings
+            or ".cdf" in gdal_warnings.lower()
+            or "ogr_FileGDB" in gdal_warnings
+        )
+ 
         if ds is None:
-            print(f"[GDB] Could not open: {gdb_path}")
+            if cdf_detected:
+                raise CdfCompressedGdbError(gdb_path, requested_name, gdal_warnings)
             return requested_name
-
-        print(f"[GDB] Opened OK, {ds.GetLayerCount()} layers:")
+ 
+        # Check if the layer is missing and CDF warnings were raised —
+        # the layer exists but OGR can't see it due to compression.
         requested_lower = requested_name.lower()
+        found_name = None
         for i in range(ds.GetLayerCount()):
             name = ds.GetLayer(i).GetName()
-            print(f"[GDB]   {i}: {repr(name)}")
             if name.lower() == requested_lower:
-                print(f"[GDB] Matched '{requested_name}' -> '{name}'")
-                return name
-
-        print(f"[GDB] No match found for '{requested_name}'")
-        return requested_name
-    except Exception as e:
-        print(f"[GDB] Exception: {e}")
-        return requested_name
+                found_name = name
+                break
+ 
+        if found_name is None and cdf_detected:
+            raise CdfCompressedGdbError(gdb_path, requested_name, gdal_warnings)
+ 
+        return found_name if found_name else requested_name
+ 
+    except CdfCompressedGdbError:
+        raise  # re-raise so the caller surfaces it cleanly
+    except Exception:
+        return requested_name  # any other error: fall back silently
+ 
+ 
+class CdfCompressedGdbError(Exception):
+    """
+    Raised when a FileGDB layer cannot be read because it uses Esri's
+    Compressed Data Format (CDF), which requires the proprietary FileGDB
+    driver that is not included in the standard QGIS installation.
+    """
+    def __init__(self, gdb_path: str, layer_name: str, gdal_message: str = ""):
+        self.gdb_path = gdb_path
+        self.layer_name = layer_name
+        self.gdal_message = gdal_message
+        super().__init__(self._build_message())
+ 
+    def _build_message(self) -> str:
+        return (
+            f"Cannot read layer '{self.layer_name}' from:\n"
+            f"  {self.gdb_path}\n\n"
+            f"This layer uses Esri's Compressed Data Format (CDF), which the "
+            f"open-source GDAL driver cannot read. ArcGIS Pro can open it "
+            f"because it uses Esri's own proprietary driver internally.\n\n"
+            f"To fix this, you have three options:\n\n"
+            f"Option 1 — Export from ArcGIS Pro (no admin rights needed):\n"
+            f"  1. In ArcGIS Pro, open the Catalog pane.\n"
+            f"  2. Right-click the '{self.layer_name}' feature class.\n"
+            f"  3. Select Export > Feature Class.\n"
+            f"  4. Save it to a new .gdb or .shp that you own.\n"
+            f"  5. Update the layer source in ArcGIS and re-export the .lyrx.\n\n"
+            f"Option 2 — Install the FileGDB GDAL plugin (requires admin):\n"
+            f"  1. Ask your administrator to install the 'gdal-filegdb' package\n"
+            f"     for your QGIS installation.\n"
+            f"  2. This adds ogr_FileGDB.dll which can read CDF-compressed GDBs.\n"
+            f"  3. Once installed, re-run the conversion — no other changes needed.\n\n"
+            f"Option 3 — Decompress the GDB (requires admin or GDB ownership):\n"
+            f"  1. In ArcGIS Pro, go to Geoprocessing > Compress File Geodatabase.\n"
+            f"  2. Run the 'Uncompress File Geodatabase Data' tool on the GDB.\n"
+            f"  3. Re-run the conversion."
+        )
 
 def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
     print(f"[MAKE_URIS] conn_str={repr(conn_str)}, factory={repr(factory)}, dataset={repr(dataset)}, dataset_type={repr(dataset_type)}")
@@ -214,6 +286,7 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
  
     # Normalize dataset slashes — LYRX JSON may use backslashes
     dataset = dataset.replace("\\", "/")
+    dataset = html.unescape(dataset)
  
     # Normalize raw_path backslashes so Path() can parse it on any OS
     raw_path = raw_path.replace("\\", "/")
