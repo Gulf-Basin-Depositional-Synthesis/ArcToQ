@@ -115,6 +115,7 @@ class ConvertDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Convert LYRX to QLR")
+        self.setWindowFlags(Qt.Window)
         self.resize(650, 600)
         self._worker = None
         self._batch_job_data = None
@@ -294,6 +295,7 @@ class ConvertDialog(QDialog):
 
     def _on_batch_finished(self):
         print("_on_batch_finished called")
+        self.progress_bar.setValue(0)
         self.run_btn.setVisible(True)
         self.cancel_btn.setVisible(False)
         self.cancel_btn.setEnabled(True)
