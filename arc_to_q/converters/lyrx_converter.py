@@ -151,13 +151,43 @@ def _parse_xml_dataconnection(xml_string: str) -> dict | None:
 
     return None
 
-def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
-    from osgeo import ogr
-    ds = ogr.Open("G:/Current_Database/Projects/Mesozoic Grain Volumes/MesoGV.gdb")
-    if ds:
+def _resolve_filegdb_layer_name(gdb_path: str, requested_name: str) -> str:
+    """
+    Resolves the correct case-sensitive layer name from a FileGDB.
+ 
+    ArcGIS is case-insensitive for layer names but OGR is not. This function
+    opens the GDB read-only and finds the layer whose name matches
+    case-insensitively, returning the name exactly as OGR sees it.
+ 
+    If the GDB cannot be opened (e.g. CDF compression, permissions) or the
+    layer is not found, the original requested_name is returned unchanged so
+    the caller can still attempt to load and surface a meaningful error.
+ 
+    Args:
+        gdb_path: Absolute path to the .gdb directory.
+        requested_name: Layer name as stored in the LYRX file.
+ 
+    Returns:
+        The OGR-correct layer name, or requested_name if not resolvable.
+    """
+    try:
+        from osgeo import ogr
+        ds = ogr.Open(gdb_path, 0)  # 0 = read-only, no risk to the GDB
+        if ds is None:
+            return requested_name
+ 
+        requested_lower = requested_name.lower()
         for i in range(ds.GetLayerCount()):
-            print(f"  Layer {i}: {ds.GetLayer(i).GetName()}")
+            name = ds.GetLayer(i).GetName()
+            if name.lower() == requested_lower:
+                return name  # found exact OGR name
+ 
+        # Not found — return original and let OGR surface the real error
+        return requested_name
+    except Exception:
+        return requested_name
 
+def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file):
     """Helper to build absolute/relative URIs and determine provider type."""
  
     # --- Handle Web Feature Services ---
@@ -178,7 +208,7 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
     # Normalize dataset slashes — LYRX JSON may use backslashes
     dataset = dataset.replace("\\", "/")
  
-    # Normalise raw_path backslashes so Path() can parse it on any OS
+    # Normalize raw_path backslashes so Path() can parse it on any OS
     raw_path = raw_path.replace("\\", "/")
  
     # Determine whether this is a raster dataset.
@@ -190,22 +220,31 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
         or factory == "Raster"
     )
  
-    lyrx_dir = Path(in_folder)
+    # --- Path resolution ---
+    # We use normpath(join(lyrx_dir, raw_path)) for ALL path types.
+    #
+    # We deliberately avoid both:
+    #   - Path.resolve(): follows OS drive mappings and expands e.g. G:\ or
+    #     relative paths to their full \\server.fqdn\share\... UNC form, which
+    #     GDAL/OGR on Windows often cannot open (especially with spaces).
+    #   - os.path.abspath(): ignores lyrx_dir and uses the process working
+    #     directory instead, which in the QGIS plugin is QGIS's own install
+    #     directory rather than the .lyrx file's location.
+    #
+    # normpath(join(lyrx_dir, raw_path)) does pure string arithmetic:
+    # it makes relative paths absolute using lyrx_dir as the base, and
+    # collapses ".." segments, without ever asking the OS to resolve symlinks
+    # or drive mappings.
+    lyrx_dir = str(Path(in_folder))
+    abs_path_str = os.path.normpath(os.path.join(lyrx_dir, raw_path))
+    abs_path = Path(abs_path_str)
  
     if is_raster:
-        # For rasters we use os.path.abspath() instead of Path.resolve().
-        # resolve() follows the OS drive mapping and expands e.g. G:\ or a
-        # relative UNC path to the full \\server.fqdn\share\... form, which
-        # GDAL on Windows often cannot open (especially with spaces in the path).
-        # abspath() just does string arithmetic and leaves drive letters intact.
-        abs_path_str = os.path.normpath(os.path.join(str(lyrx_dir), raw_path))
-        abs_path = Path(abs_path_str)
         # Keep native OS separators for GDAL (backslashes on Windows)
         abs_posix = abs_path_str
         sep = os.sep
         provider = "gdal"
     else:
-        abs_path = (lyrx_dir / raw_path).resolve()
         abs_posix = abs_path.as_posix()
         sep = "/"
         provider = "ogr"
@@ -213,7 +252,10 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
     # --- Build absolute URI ---
     if factory == "FileGDB":
         if dataset_type in ("esriDTFeatureClass", "esriDTTable"):
-            abs_uri = f"{abs_posix}|layername={dataset}"
+            # Resolve the actual layer name from the GDB to handle case
+            # sensitivity differences between ArcGIS and OGR.
+            resolved_dataset = _resolve_filegdb_layer_name(abs_path_str, dataset)
+            abs_uri = f"{abs_posix}|layername={resolved_dataset}"
         elif is_raster:
             abs_uri = abs_posix + sep + dataset.replace("/", sep)
         else:
@@ -222,17 +264,15 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
         abs_uri = abs_posix + sep + dataset.replace("/", sep)
  
     # --- Build relative URI ---
-    # Forward slashes are fine for the relative URI regardless of platform.
-    # os.path.relpath raises ValueError when source and destination are on
-    # different drives — fall back to absolute URI in that case.
     try:
-        out_dir = Path(out_file).parent.resolve()
+        out_dir = Path(out_file).parent
         rel_path = Path(os.path.relpath(abs_path, start=out_dir))
         rel_posix = rel_path.as_posix()
  
         if factory == "FileGDB":
             if dataset_type in ("esriDTFeatureClass", "esriDTTable"):
-                rel_uri = f"{rel_posix}|layername={dataset}"
+                resolved_dataset = _resolve_filegdb_layer_name(abs_path_str, dataset)
+                rel_uri = f"{rel_posix}|layername={resolved_dataset}"
             elif is_raster:
                 rel_uri = f"{rel_posix}/{dataset}"
             else:
@@ -240,6 +280,7 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
         else:
             rel_uri = f"{rel_posix}/{dataset}"
     except ValueError:
+        # Different drives (e.g. G:\ vs C:\) — relative path is impossible.
         rel_uri = abs_uri
  
     # --- Shapefile extension and definition query ---
@@ -255,59 +296,6 @@ def _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, o
             rel_uri += def_query
  
     return abs_uri, rel_uri, provider
-
-def _parse_source(in_folder, data_connection, def_query, out_file):
-    """Build both absolute and relative QGIS-friendly URIs for a dataset.
-    
-    Handles both direct feature class connections and joined tables.
-    
-    Args:
-        in_folder (str): Path to the folder containing the .lyrx file.
-        data_connection (dict): The data connection info from the .lyrx file.
-        def_query (str): The definition query string to append to the URI (or empty string).
-            The query should already be in QGIS-compatible format, including the leading "|subset=".
-        out_file (str): Path to the converted QGIS .qlr file.
-    Returns:
-        tuple: (abs_uri, rel_uri, join_info)
-          - abs_uri: Absolute QGIS URI for the base dataset
-          - rel_uri: Relative QGIS URI for the base dataset
-          - join_info: dict describing join (or None if not a join)
-        tuple: ( (abs_uri, rel_uri, provider), join_info )
-    """
-    factory = data_connection.get("workspaceFactory")
-    conn_str = data_connection.get("workspaceConnectionString", "")
-    dataset = data_connection.get("dataset")
-    dataset_type = data_connection.get("datasetType")
-
-    # --- Handle direct connections (FileGDB, Shapefile, Raster) ---
-    if factory and conn_str and dataset:
-        return _make_uris(in_folder, conn_str, factory, dataset, dataset_type, def_query, out_file), None
-
-    # --- Handle table join (CIMRelQueryTableDataConnection) ---
-    if data_connection.get("type") == "CIMRelQueryTableDataConnection":
-        if def_query:
-            raise NotImplementedError("Definition queries on joined layers are not yet supported.")
-
-        source = data_connection.get("sourceTable", {})
-        dest = data_connection.get("destinationTable", {})
-
-        (abs_uri, rel_uri, src_provider), _ = _parse_source(in_folder, source, "", out_file)
-        (abs_table_uri, rel_table_uri, dest_provider), _ = _parse_source(in_folder, dest, "", out_file)
-
-        join_info = {
-            "primaryKey": data_connection.get("primaryKey"),
-            "foreignKey": data_connection.get("foreignKey"),
-            "joinType": data_connection.get("joinType", "esriLeftOuterJoin"),
-            "destinationAbs": abs_table_uri,
-            "destinationRel": rel_table_uri,
-            "destinationName": dest.get("dataset"),
-            "sourceProvider": src_provider,
-            "destinationProvider": dest_provider
-        }
-
-        return (abs_uri, rel_uri, src_provider), join_info
-
-    raise NotImplementedError(f"Unsupported dataConnection type: {data_connection.get('type')}")
 
 
 def _set_layer_transparency(layer: QgsMapLayer, layer_def: dict):
