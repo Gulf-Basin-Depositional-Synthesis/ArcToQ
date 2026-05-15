@@ -267,7 +267,7 @@ class ConvertDialog(QDialog):
         self._worker = BatchWorker(files, out_dir, save_in_place, mirror_structure, allow_overwrite, common_base)
         self._worker.progress.connect(self.progress_bar.setValue)
         self._worker.file_result.connect(self._on_file_result)
-        self._worker.finished.connect(self._on_batch_finished)
+        self._worker.finished.connect(self._on_batch_finished, Qt.QueuedConnection)
         self._worker.start()
 
     def _cancel_batch(self):
