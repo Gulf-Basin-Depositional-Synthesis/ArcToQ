@@ -222,7 +222,7 @@ class ConvertDialog(QDialog):
         layout.addLayout(btn_layout)
         dialog.exec_()
 
-    def report_to_github(self, file_name, error_msg):
+    def report_to_github(self, file_name, error_msg, max_error_chars=2000):
         """Constructs a pre-filled GitHub issue URL and opens it in the browser."""
         os_info = f"{platform.system()} {platform.release()}"
         qgis_ver = Qgis.QGIS_VERSION
@@ -232,10 +232,11 @@ class ConvertDialog(QDialog):
         
         body = "**Describe the issue**\n"
         body += f"Failed to convert `{file_name}`.\n\n"
-        body += "More Details:\n"
+        body += "More Details:\n\n"
         body += "Error trace:\n"
         body += f"{code_block}python\n"
-        body += f"{error_msg}\n"
+        truncated = error_msg[:max_error_chars] + ("\n... (truncated)" if len(error_msg) > max_error_chars else "")
+        body += f"{truncated}\n"
         body += f"{code_block}\n\n"
         body += "**To Reproduce**\n"
         body += "Steps to reproduce the behavior:\n"

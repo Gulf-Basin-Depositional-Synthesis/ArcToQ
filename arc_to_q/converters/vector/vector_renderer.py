@@ -619,61 +619,6 @@ class VectorRenderer:
             logger.error(f"Failed to create renderer category: {e}")
             return None
     
-    def _create_graduated_renderer(self, renderer_def: Dict[str, Any],
-                                    layer: QgsVectorLayer) -> QgsGraduatedSymbolRenderer:
-        """
-        Create a QGIS graduated renderer from a CIMClassBreaksRenderer definition.
-        """
-        expression_string = None
-        is_expression = "valueExpressionInfo" in renderer_def
-
-        if is_expression:
-            arcade_expr = renderer_def["valueExpressionInfo"]["expression"]
-            expression_string = translate_arcade_expression(arcade_expr)
-        else:
-            expression_string = renderer_def.get("field")
-
-        if not expression_string:
-            raise RendererCreationError("No field or translatable expression found for class breaks renderer")
-
-        # Only validate the field if it's not a complex expression
-        if not is_expression and not self._validate_field_exists(layer, expression_string):
-            raise RendererCreationError(f"Field '{expression_string}' not found in layer '{layer.name()}'")
-
-        if renderer_def.get("classBreakType") == "UnclassedColor":
-            return self._create_unclassed_color_renderer(renderer_def, layer, expression_string)
-
-        breaks = renderer_def.get("breaks", [])
-        if not breaks:
-            return self._create_default_graduated_renderer(layer, expression_string)
-
-        minimum_break = renderer_def.get("minimumBreak", 0.0)
-        is_reversed = not renderer_def.get("showInAscendingOrder", True)
-        
-        ranges = []
-        lower_bound = minimum_break
-        
-        symbols = [self.symbol_factory.create_symbol(b.get("symbol", {})) or self._create_default_symbol(layer) for b in breaks]
-        if is_reversed:
-            symbols.reverse()
-
-        for i, break_def in enumerate(breaks):
-            upper_bound = break_def.get("upperBound", 0.0)
-            label = break_def.get("label", f"{lower_bound:.2f} - {upper_bound:.2f}")
-            symbol = symbols[i].clone()
-            ranges.append(QgsRendererRange(lower_bound, upper_bound, symbol, label))
-            lower_bound = upper_bound
-        
-        if is_reversed:
-            ranges.reverse()
-
-        if not ranges:
-            return self._create_default_graduated_renderer(layer, expression_string)
-
-        renderer = QgsGraduatedSymbolRenderer(expression_string, ranges)
-        self._apply_common_renderer_properties(renderer, renderer_def)
-        return renderer
-    
     def _validate_field_exists(self, layer: QgsVectorLayer, field_name: str) -> bool:
         """Validate that a field exists in the layer."""
         field_names = [field.name() for field in layer.fields()]
