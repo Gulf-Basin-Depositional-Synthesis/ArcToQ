@@ -385,7 +385,7 @@ class ConvertDialog(QDialog):
         
         body = "**Describe the issue**\n"
         body += f"Failed to convert `{file_name}`.\n\n"
-        body += "More Details:\n"
+        body += "More Details:\n\n"
         body += "Error trace:\n"
         body += f"{code_block}python\n"
         body += f"{truncated}\n"
@@ -595,7 +595,7 @@ class ArcToQPlugin:
         dialog = ConvertDialog(self.iface.mainWindow())
         dialog.progress_bar.setValue(0)
         dialog.run_btn.clicked.connect(lambda: self._process_conversion(dialog))
-        dialog.exec_()
+        dialog.show()  
 
     def _process_conversion(self, dialog):
         is_batch_mode = dialog.tabs.currentIndex() == 1
